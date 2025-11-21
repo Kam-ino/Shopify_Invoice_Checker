@@ -1,32 +1,40 @@
 import { useState } from "react";
-import * as XLSX from 'xlsx';
+import * as XLSX from "xlsx";
 
 function Table({
   title = "Upload & View Excel Sheets",
   idKey = "ID",
+  uploadId = "upload-input",
   onDataChange,
   enableSorting = true,
-  highlightValue,          // <- new: order number to bring to top & highlight
+  highlightValue, // normalized order number from App.js
 }) {
   const [typeError, setTypeError] = useState(null);
-  const [excelData, setExcelData] = useState(null);
-  const [sortDirection, setSortDirection] = useState('asc'); // 'asc' or 'desc'
+  const [rows, setRows] = useState(null);       // data rows
+  const [columns, setColumns] = useState([]);   // header order
+  const [sortDirection, setSortDirection] = useState("asc");
 
+  const allowedFileTypes = [
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "text/csv",
+  ];
+
+  const normalize = (value) => {
+    if (value == null) return "";
+    return String(value).replace(/[^0-9A-Za-z]/g, "").trim();
+  };
+
+  // Auto-upload & parse on file select
   const handleFile = (e) => {
-    const fileTypes = [
-      'application/vnd.ms-excel',
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      'text/csv'
-    ];
     const selectedFile = e.target.files[0];
 
-    if (!selectedFile) {
-      return;
-    }
+    if (!selectedFile) return;
 
-    if (!fileTypes.includes(selectedFile.type)) {
-      setTypeError('Please select only Excel or CSV file types');
-      setExcelData(null);
+    if (!allowedFileTypes.includes(selectedFile.type)) {
+      setTypeError("Please select only Excel or CSV file types");
+      setRows(null);
+      setColumns([]);
       if (onDataChange) onDataChange([]);
       return;
     }
@@ -38,71 +46,94 @@ function Table({
     reader.onload = (event) => {
       const buffer = event.target.result;
       try {
-        const workbook = XLSX.read(buffer, { type: 'buffer' });
+        const workbook = XLSX.read(buffer, { type: "buffer" });
         const worksheetName = workbook.SheetNames[0];
         const worksheet = workbook.Sheets[worksheetName];
-        const data = XLSX.utils.sheet_to_json(worksheet);
 
-        setExcelData(data);
+        // Read as arrays so we preserve the exact column order
+        const rowsAsArrays = XLSX.utils.sheet_to_json(worksheet, {
+          header: 1,   // first row is headers
+          defval: "",  // keep empty cells as ""
+        });
+
+        if (!rowsAsArrays.length) {
+          setRows([]);
+          setColumns([]);
+          if (onDataChange) onDataChange([]);
+          return;
+        }
+
+        const headerRow = rowsAsArrays[0];
+        const headers = headerRow.map((h, idx) =>
+          h && String(h).trim() !== "" ? String(h) : `Column ${idx + 1}`
+        );
+
+        const dataRows = rowsAsArrays.slice(1).map((rowArr) => {
+          const obj = {};
+          headers.forEach((header, i) => {
+            obj[header] = rowArr[i];
+          });
+          return obj;
+        });
+
+        setColumns(headers);
+        setRows(dataRows);
         if (onDataChange) {
-          onDataChange(data);
+          onDataChange(dataRows);
         }
       } catch (err) {
-        console.error('Error reading file', err);
-        setTypeError('There was a problem reading this file. Please check the format.');
-        setExcelData(null);
+        console.error("Error reading file", err);
+        setTypeError(
+          "There was a problem reading this file. Please check the format."
+        );
+        setRows(null);
+        setColumns([]);
         if (onDataChange) onDataChange([]);
       }
     };
   };
 
   const toggleSortDirection = () => {
-    setSortDirection(prev => (prev === 'asc' ? 'desc' : 'asc'));
+    setSortDirection((prev) => (prev === "asc" ? "desc" : "asc"));
   };
 
-  const getSortedData = () => {
-    if (!excelData) return null;
-    if (!excelData.length) return [];
+  const getSortedRows = () => {
+    if (!rows) return null;
+    if (!rows.length) return [];
 
-    let dataCopy = [...excelData];
+    let dataCopy = [...rows];
 
-    // Sort by ID if the column exists
-    if (idKey in dataCopy[0]) {
+    // Sort by ID column if it exists
+    if (columns.includes(idKey)) {
       dataCopy.sort((a, b) => {
-        const valA = a[idKey];
-        const valB = b[idKey];
+        const aStr = normalize(a[idKey]);
+        const bStr = normalize(b[idKey]);
 
-        if (valA == null || valB == null) return 0;
-
-        const numA = Number(valA);
-        const numB = Number(valB);
+        const numA = Number(aStr);
+        const numB = Number(bStr);
 
         if (!isNaN(numA) && !isNaN(numB)) {
           // numeric sort
-          return sortDirection === 'asc' ? numA - numB : numB - numA;
+          return sortDirection === "asc" ? numA - numB : numB - numA;
         }
 
         // string sort fallback
-        const strA = String(valA);
-        const strB = String(valB);
-        if (strA < strB) return sortDirection === 'asc' ? -1 : 1;
-        if (strA > strB) return sortDirection === 'asc' ? 1 : -1;
-        return 0;
+        if (sortDirection === "asc") {
+          return aStr.localeCompare(bStr);
+        } else {
+          return bStr.localeCompare(aStr);
+        }
       });
     }
 
     // If a search highlight is set, move the matching row(s) to the top
-    if (highlightValue != null) {
-      const normalizedHighlight = String(highlightValue).trim();
+    if (highlightValue != null && highlightValue !== "") {
       const highlightedRows = [];
       const otherRows = [];
 
       dataCopy.forEach((row) => {
-        const rawId = row[idKey];
-        const normalizedId =
-          rawId != null ? String(rawId).trim() : '';
-
-        if (normalizedId === normalizedHighlight) {
+        const rowIdNormalized = normalize(row[idKey]);
+        if (rowIdNormalized === String(highlightValue)) {
           highlightedRows.push(row);
         } else {
           otherRows.push(row);
@@ -115,7 +146,7 @@ function Table({
     return dataCopy;
   };
 
-  const sortedData = getSortedData();
+  const sortedRows = getSortedRows();
 
   return (
     <div className="wrapper">
@@ -128,12 +159,12 @@ function Table({
       >
         <input
           type="file"
-          id="upload"
+          id={uploadId}
           className="form-control"
           onChange={handleFile}
-          style={{ display: 'none' }}
+          style={{ display: "none" }}
         />
-        <label htmlFor="upload" className="button">
+        <label htmlFor={uploadId} className="button">
           UPLOAD
         </label>
 
@@ -144,51 +175,49 @@ function Table({
         )}
       </form>
 
-      {excelData && enableSorting && (
+      {rows && enableSorting && (
         <button
           type="button"
           className="button"
           onClick={toggleSortDirection}
-          style={{ marginTop: '10px', marginBottom: '10px' }}
+          style={{ marginTop: "10px", marginBottom: "10px" }}
         >
-          Sort by {idKey} ({sortDirection === 'asc' ? 'Ascending' : 'Descending'})
+          Sort by {idKey} ({sortDirection === "asc" ? "Ascending" : "Descending"}
+          )
         </button>
       )}
 
       {/* view data */}
       <div className="viewer">
-        {sortedData && sortedData.length > 0 ? (
-          <div className="table-responsive">
+        {sortedRows && sortedRows.length > 0 ? (
+          <div className="table-wrapper">
             <table className="table">
               <thead>
                 <tr>
-                  {Object.keys(sortedData[0]).map((key) => (
-                    <th key={key}>{key}</th>
+                  {columns.map((col) => (
+                    <th key={col}>{col}</th>
                   ))}
                 </tr>
               </thead>
 
               <tbody>
-                {sortedData.map((row, index) => {
-                  const rawId = row[idKey];
-                  const normalizedId =
-                    rawId != null ? String(rawId).trim() : '';
+                {sortedRows.map((row, index) => {
                   const isHighlighted =
                     highlightValue != null &&
-                    normalizedId === String(highlightValue).trim();
+                    normalize(row[idKey]) === String(highlightValue);
 
                   return (
                     <tr
                       key={index}
-                      className={isHighlighted ? 'highlight-row' : ''}
+                      className={isHighlighted ? "highlight-row" : ""}
                       style={
                         isHighlighted
-                          ? { backgroundColor: '#c8f7c5' } // light green
+                          ? { backgroundColor: "#c8f7c5" } // light green
                           : {}
                       }
                     >
-                      {Object.keys(row).map((key) => (
-                        <td key={key}>{row[key]}</td>
+                      {columns.map((col) => (
+                        <td key={col}>{row[col]}</td>
                       ))}
                     </tr>
                   );
