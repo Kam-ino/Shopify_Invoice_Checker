@@ -1,243 +1,320 @@
-import './App.css';
-import { useState } from 'react';
-import Table from './components/table';
+import "./App.css";
+import React, { useState } from "react";
+import Table from "./components/table";
+import * as XLSX from "xlsx";
+
+// Helper to parse totals from Oct prices (strip currency etc)
+function parsePrice(val) {
+  if (val === null || val === undefined || val === "") return NaN;
+  if (typeof val === "number") return val;
+  let s = String(val).trim();
+  ["US$", "$", "€", "EUR"].forEach((p) => {
+    if (s.startsWith(p)) {
+      s = s.slice(p.length);
+    }
+  });
+  const num = Number(s);
+  return isNaN(num) ? NaN : num;
+}
+
+// Mapping for country-specific columns in Oct prices
+const COUNTRY_COLUMNS = {
+  FR: { total: "Total to FR", upsell: "Upsell to FR" },
+  BE: { total: "Total to BE", upsell: "Upsell to BE" },
+  CH: { total: "Total to CH", upsell: "Upsell to CH" },
+  // In the provided file, this header actually has spaces before CA
+  CA: { total: "Total to CA", upsell: "Upsell to    CA" },
+};
+
+// Build index from Oct prices: index[SKU][QTY] = row
+function buildPriceIndex(pricesRows) {
+  const index = {};
+  if (!pricesRows) return index;
+
+  pricesRows.forEach((row) => {
+    const sku = row["SKU"];
+    const qty = Number(row["QTY"] || 0);
+    if (!sku || !qty) return;
+
+    if (!index[sku]) index[sku] = {};
+    index[sku][qty] = row;
+  });
+
+  return index;
+}
+
+// Group orders rows by Order#
+function groupByOrder(ordersRows) {
+  const map = {};
+  if (!ordersRows) return map;
+  ordersRows.forEach((row) => {
+    const orderNo = row["Order#"];
+    if (!orderNo) return;
+    if (!map[orderNo]) map[orderNo] = [];
+    map[orderNo].push(row);
+  });
+  return map;
+}
+
+// Compute expected total vs reported total for an order
+function computeOrderResult(orderRows, priceIndex) {
+  if (!orderRows || orderRows.length === 0) return null;
+
+  const orderNo = orderRows[0]["Order#"];
+
+  // Country = first non-empty Country cell
+  const countryRow =
+    orderRows.find(
+      (r) => r["Country"] && String(r["Country"]).trim() !== ""
+    ) || null;
+  const country = countryRow ? String(countryRow["Country"]).trim() : null;
+  const countryCols = COUNTRY_COLUMNS[country] || null;
+
+  // Group by base SKU
+  const groups = {};
+  orderRows.forEach((row) => {
+    const skuBase = row["SKU.1"] || row["SKU"];
+    const qty = Number(row["QTY"] || 0);
+    const cost = Number(row["Cost"] || 0);
+    const upsell = Number(row["Upsell"] || 0);
+    if (!skuBase || !qty) return;
+
+    if (!groups[skuBase]) {
+      groups[skuBase] = { qty: 0, cost: 0, upsell: 0 };
+    }
+    groups[skuBase].qty += qty;
+    groups[skuBase].cost += cost;
+    groups[skuBase].upsell += upsell;
+  });
+
+  let baseTotal = 0;
+  let upsellTotal = 0;
+
+  if (countryCols) {
+    Object.entries(groups).forEach(([skuBase, info]) => {
+      const { qty, cost, upsell } = info;
+      const skuPrices = priceIndex[skuBase];
+      if (!skuPrices) return;
+      const priceRow = skuPrices[qty];
+      if (!priceRow) return;
+
+      if (cost > 0 && (!upsell || upsell === 0)) {
+        // base product
+        baseTotal += parsePrice(priceRow[countryCols.total]);
+      } else if ((!cost || cost === 0) && upsell > 0) {
+        // upsell only
+        upsellTotal += parsePrice(priceRow[countryCols.upsell]);
+      } else {
+        // weird combination, skip
+      }
+    });
+  }
+
+  const expectedTotal = baseTotal + upsellTotal;
+
+  // reported total: first non-empty Total cell for this order
+  const totalRow = orderRows.find(
+    (r) => r["Total"] !== null && r["Total"] !== undefined && r["Total"] !== ""
+  );
+  const reportedTotal = totalRow ? Number(totalRow["Total"]) : NaN;
+
+  const difference =
+    !isNaN(expectedTotal) && !isNaN(reportedTotal)
+      ? reportedTotal - expectedTotal
+      : NaN;
+
+  const status =
+    isNaN(difference) || Math.abs(difference) <= 0.01 ? "ok" : "mismatch";
+
+  return {
+    order: orderNo,
+    country,
+    baseTotal,
+    upsellTotal,
+    expectedTotal,
+    reportedTotal,
+    difference,
+    status,
+  };
+}
+
+// Helper to sort results by numeric Order# (handles "#114006")
+const sortResultsByOrder = (list, dir) => {
+  const getOrderNumber = (val) => {
+    const s = String(val ?? "");
+    const m = s.match(/\d+/);
+    return m ? Number(m[0]) : 0;
+  };
+
+  const copy = [...list];
+  copy.sort((a, b) => {
+    const numA = getOrderNumber(a.order);
+    const numB = getOrderNumber(b.order);
+    return dir === "asc" ? numA - numB : numB - numA;
+  });
+  return copy;
+};
 
 function App() {
-  const [leftData, setLeftData] = useState([]);
-  const [rightData, setRightData] = useState([]);
+  const [ordersFile, setOrdersFile] = useState(null); // { rows, columns }
+  const [pricesFile, setPricesFile] = useState(null); // { rows, columns }
+  const [results, setResults] = useState([]);
+  const [correctedOrders, setCorrectedOrders] = useState(null);
+  const [message, setMessage] = useState("");
+  const [resultsSortDir, setResultsSortDir] = useState("asc");
 
-  // Search state
-  const [searchTerm, setSearchTerm] = useState('');
-  const [highlightLeftId, setHighlightLeftId] = useState(null);
-  const [highlightRightId, setHighlightRightId] = useState(null);
-
-  // Info for the side container
-  const [searchInfo, setSearchInfo] = useState(null);
-
-  const idKey = 'ORDER NUMBER';
-
-  const normalize = (value) => {
-    if (value == null) return '';
-    return String(value).replace(/[^0-9A-Za-z]/g, '').trim();
-  };
-
-  const handleSearch = (e) => {
-    e.preventDefault();
-
-    const query = searchTerm.trim();
-    if (!query) {
-      setHighlightLeftId(null);
-      setHighlightRightId(null);
-      setSearchInfo(null);
+  const handleRunCheck = () => {
+    if (!ordersFile || !ordersFile.rows || !pricesFile || !pricesFile.rows) {
+      setMessage("Please upload both Orders tracking & costs and Oct prices.");
+      setResults([]);
+      setCorrectedOrders(null);
       return;
     }
 
-    const normalizedQuery = normalize(query);
+    const ordersRows = ordersFile.rows;
+    const pricesRows = pricesFile.rows;
 
-    // If nothing uploaded yet
-    if (!leftData.length && !rightData.length) {
-      setHighlightLeftId(null);
-      setHighlightRightId(null);
-      setSearchInfo({
-        query,
-        foundInLeft: false,
-        foundInRight: false,
-        shopifyMatches: [],
-        message: 'Please upload both tables before searching.',
-      });
-      return;
-    }
+    const priceIndex = buildPriceIndex(pricesRows);
+    const ordersByOrderNo = groupByOrder(ordersRows);
 
-    const foundInLeft = leftData.some(
-      (row) => normalize(row[idKey]) === normalizedQuery
-    );
-    const foundInRight = rightData.some(
-      (row) => normalize(row[idKey]) === normalizedQuery
-    );
+    const newResults = [];
+    const correctedTotalsByOrder = {};
 
-    const shopifyMatches = rightData.filter(
-      (row) => normalize(row[idKey]) === normalizedQuery
-    );
+    Object.keys(ordersByOrderNo).forEach((orderNo) => {
+      const orderRows = ordersByOrderNo[orderNo];
+      const res = computeOrderResult(orderRows, priceIndex);
+      if (!res) return;
+      newResults.push(res);
 
-    setHighlightLeftId(foundInLeft ? normalizedQuery : null);
-    setHighlightRightId(foundInRight ? normalizedQuery : null);
-
-    let message;
-    if (!foundInLeft && !foundInRight) {
-      message = `Order ${query} was not found in either table.`;
-    } else {
-      const parts = [];
-      parts.push(foundInLeft ? 'Found in INVOICE' : 'Missing in INVOICE');
-      parts.push(foundInRight ? 'Found in SHOPIFY' : 'Missing in SHOPIFY');
-      message = `${parts.join(' | ')} for order ${query}.`;
-    }
-
-    setSearchInfo({
-      query,
-      foundInLeft,
-      foundInRight,
-      shopifyMatches,
-      message,
+      if (res.status === "mismatch" && !isNaN(res.expectedTotal)) {
+        correctedTotalsByOrder[orderNo] =
+          Math.round(res.expectedTotal * 100) / 100;
+      }
     });
+
+    const sorted = sortResultsByOrder(newResults, resultsSortDir);
+    setResults(sorted);
+
+    // Build new orders rows with "Corrected Total" column
+    const correctedRows = ordersRows.map((row) => {
+      const orderNo = row["Order#"];
+      const corrected = correctedTotalsByOrder[orderNo];
+      return {
+        ...row,
+        "Corrected Total":
+          corrected !== undefined && corrected !== null ? corrected : "",
+      };
+    });
+
+    const existingCols =
+      ordersFile.columns || Object.keys(ordersRows[0] || {});
+    const correctedColumns = existingCols.includes("Corrected Total")
+      ? existingCols
+      : [...existingCols, "Corrected Total"];
+
+    setCorrectedOrders({ rows: correctedRows, columns: correctedColumns });
+
+    setMessage(
+      `Check completed: ${newResults.length} orders processed. ` +
+        `${newResults.filter((r) => r.status === "mismatch").length} mismatches.`
+    );
   };
 
-  const clearSearch = () => {
-    setSearchTerm('');
-    setHighlightLeftId(null);
-    setHighlightRightId(null);
-    setSearchInfo(null);
+  const handleDownload = () => {
+    if (!correctedOrders || !correctedOrders.rows.length) {
+      setMessage("Nothing to download yet. Run the check first.");
+      return;
+    }
+
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.json_to_sheet(correctedOrders.rows, {
+      header: correctedOrders.columns,
+    });
+    XLSX.utils.book_append_sheet(wb, ws, "Sheet1");
+    XLSX.writeFile(wb, "Orders_tracking_corrected.xlsx");
   };
-
-  // Colors for the INVOICE / SHOPIFY cells in the top 1x2 grid
-  const invoiceCellColor = searchInfo
-    ? searchInfo.foundInLeft
-      ? '#31ca31'
-      : '#f12222'
-    : '#cccccc';
-
-  const shopifyCellColor = searchInfo
-    ? searchInfo.foundInRight
-      ? '#31ca31'
-      : '#f12222'
-    : '#cccccc';
 
   return (
     <div className="App">
-      <div className='side-by-side'>
-        <div className="search-container">
-          <form onSubmit={handleSearch} className="search-form">
-            <div className="Card">
-              <div className="CardInner">
-                <label htmlFor="order-search">
-                  Search by {idKey}
-                </label>
-
-                <div className="SearchCard-container">
-                  <div className="Icon">
-                    <svg
-                      xmlns="http://www.w3.org/2000/svg"
-                      width="24"
-                      height="24"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="#657789"
-                      strokeWidth="3"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      className="feather feather-search"
-                    >
-                      <circle cx="11" cy="11" r="8" />
-                      <line x1="21" y1="21" x2="16.65" y2="16.65" />
-                    </svg>
-                  </div>
-
-                  <div className="InputContainer">
-                    <input
-                      id="order-search"
-                      placeholder="Enter order number..."
-                      value={searchTerm}
-                      onChange={(e) => setSearchTerm(e.target.value)}
-                    />
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <button type="submit" className="button search-card-button">
-              Search
-            </button>
-
-            {searchTerm && (
-              <button
-                type="button"
-                className="button secondary search-card-button"
-                onClick={clearSearch}
-              >
-                Clear
-              </button>
-            )}
-          </form>
-        </div>
+      {/* Top buttons */}
+      <div className="controls">
+        <button className="button" onClick={handleRunCheck}>
+          Run check
+        </button>
+        <button className="button secondary" onClick={handleDownload}>
+          Download corrected Orders file
+        </button>
+        {message && <div className="status-message">{message}</div>}
       </div>
 
-      <div className="main-layout">
-        <div className="tables-column">
-          <div className="side-by-side">
-            <div className="top-bottom">
-              <Table
-                title="INVOICE (SAMPLE)"
-                idKey={idKey}
-                uploadId="invoice-upload"
-                onDataChange={setLeftData}
-                enableSorting={true}
-                highlightValue={highlightLeftId}
-              />
-              <Table
-                title="SHOPIFY (SAMPLE)"
-                idKey={idKey}
-                uploadId="shopify-upload"
-                onDataChange={setRightData}
-                enableSorting={true}
-                highlightValue={highlightRightId}
-              />
-            </div>
-            <div className="search-panel">
-              <div className="search-popup">
-                <div className="search-popup-grid">
-                  <div
-                    className="search-popup-cell"
-                    style={{ backgroundColor: invoiceCellColor }}
-                  >
-                    INVOICE
-                  </div>
-                  <div
-                    className="search-popup-cell"
-                    style={{ backgroundColor: shopifyCellColor }}
-                  >
-                    SHOPIFY
-                  </div>
-                </div>
+      {/* Upload tables */}
+      <div className="side-by-side">
+        <Table title="Orders tracking & costs" onDataChange={setOrdersFile} />
+        <Table title="October prices" onDataChange={setPricesFile} />
+      </div>
 
-                <div className="search-popup-body">
-                  {searchInfo ? (
-                    <>
-                      <p>
-                        <strong>Order:</strong> {searchInfo.query}
-                      </p>
-                      <p className="search-popup-message">{searchInfo.message}</p>
+      {/* Results table */}
+      {results && results.length > 0 && (
+        <div className="results-wrapper">
+          <div className="results-header">
+            <h2>Order check results</h2>
+            <button
+              type="button"
+              className="button small"
+              onClick={() =>
+                setResultsSortDir((prevDir) => {
+                  const newDir = prevDir === "asc" ? "desc" : "asc";
+                  setResults((prev) => sortResultsByOrder(prev, newDir));
+                  return newDir;
+                })
+              }
+            >
+              Sort by Order# (
+              {resultsSortDir === "asc" ? "Ascending" : "Descending"})
+            </button>
+          </div>
 
-                      {searchInfo.shopifyMatches &&
-                      searchInfo.shopifyMatches.length > 0 ? (
-                        <>
-                          <h4>Shopify details</h4>
-                          <div className="search-popup-details">
-                            {Object.entries(searchInfo.shopifyMatches[0]).map(
-                              ([key, value]) => (
-                                <div className="detail-row" key={key}>
-                                  <span className="detail-key">{key}</span>
-                                  <span className="detail-value">
-                                    {value != null ? String(value) : ''}
-                                  </span>
-                                </div>
-                              )
-                            )}
-                          </div>
-                        </>
-                      ) : (
-                        <p>No Shopify data found for this order.</p>
-                      )}
-                    </>
-                  ) : (
-                    <p>Search for an order above to see Shopify details here.</p>
-                  )}
-                </div>
-              </div>
-            </div>
+          <div className="table-wrapper">
+            <table className="table results-table">
+              <thead>
+                <tr>
+                  <th>Order#</th>
+                  <th>Country</th>
+                  <th>Base total</th>
+                  <th>Upsell total</th>
+                  <th>Expected total</th>
+                  <th>Reported total</th>
+                  <th>Difference</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {results.map((r) => (
+                  <tr
+                    key={r.order}
+                    className={r.status === "mismatch" ? "row-red" : "row-green"}
+                  >
+                    <td>{r.order}</td>
+                    <td>{r.country}</td>
+                    <td>{r.baseTotal.toFixed(2)}</td>
+                    <td>{r.upsellTotal.toFixed(2)}</td>
+                    <td>{r.expectedTotal.toFixed(2)}</td>
+                    <td>
+                      {isNaN(r.reportedTotal)
+                        ? ""
+                        : r.reportedTotal.toFixed(2)}
+                    </td>
+                    <td>
+                      {isNaN(r.difference) ? "" : r.difference.toFixed(2)}
+                    </td>
+                    <td>{r.status === "mismatch" ? "❌ mismatch" : "✅ ok"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
-
-
-      </div>
+      )}
     </div>
   );
 }

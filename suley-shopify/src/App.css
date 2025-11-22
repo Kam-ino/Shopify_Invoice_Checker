@@ -1,275 +1,66 @@
-.App {
-  text-align: center;
-  background-color: #282c34;
-  min-height: 100vh;
-}
-
-.App-logo {
-  height: 40vmin;
-  pointer-events: none;
-}
-
-@media (prefers-reduced-motion: no-preference) {
-  .App-logo {
-    animation: App-logo-spin infinite 20s linear;
-  }
-}
-
-.App-header {
+.side-by-side {
   display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  font-size: calc(10px + 2vmin);
-  color: white;
-}
-
-.App-link {
-  color: #61dafb;
-}
-
-.main-layout {
-  display: flex;
+  gap: 20px;
   align-items: flex-start;
-  gap: 24px;  
   margin-top: 20px;
 }
 
-.tables-column {
-  flex: 1 1 auto;
+.wrapper {
+  flex: 1 1 0;
+  background: #7de0ff;
+  padding: 16px;
+  border-radius: 18px;
 }
 
-.search-panel {
-  flex: 0 0 320px;   
-}
-
-
-.side-by-side {
-  display: flex;
-  flex-direction: row;
-  align-content: start;
-}
-
-.top-bottom {
-  display: flex;
-  flex-direction: column;
-  align-content: start;
-}
-
-.search-popup {
-  width: 30vw;
-  max-height: 80vh;
-  overflow-y: auto;
-  background: #ffffff;
-  color: #111;
-  border-radius: 8px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
-  padding: 12px 14px;
-  font-size: 0.85rem;
-  margin: 20px;
-}
-
-/* 1x2 grid for INVOICE / SHOPIFY */
-.search-popup-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 4px;
-  margin-bottom: 8px;
-}
-
-.search-popup-cell {
-  text-align: center;
-  padding: 6px 8px;
-  font-weight: 600;
-  border-radius: 4px;
-}
-
-/* body/content */
-.search-popup-body p {
-  margin: 4px 0;
-}
-
-.search-popup-message {
-  margin-bottom: 6px;
-}
-
-.search-popup-details {
-  margin-top: 8px;
-  border-top: 1px solid #eee;
-  padding-top: 6px;
-}
-
-.search-popup-details .detail-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  column-gap: 6px;
-  margin-bottom: 4px;
-}
-
-.detail-key {
-  font-weight: 600;
-}
-
-.detail-value {
-  word-break: break-word;
-}
-
-
-.detail-key {
-  font-weight: 600;
-}
-
-.detail-value {
-  word-break: break-word;
-}
-
-
-.highlight-row {
-  font-weight: 600;
+.table-wrapper {
+  max-width: 100%;
+  overflow-x: auto;
 }
 
 .table {
-  table-layout: fixed; 
+  border-collapse: collapse;
+  width: 100%;
 }
 
-.table th {
-  padding: 8px;
-  white-space: normal; 
-}
-
+.table th,
 .table td {
-  width: 50px;
-  height: 5px;
-  max-width: 100px;
-  border: 1px black;
-  overflow: hidden;
-  text-overflow:ellipsis;
-  white-space: nowrap;    
+  padding: 4px 8px;
+  border-bottom: 1px solid #ddd;
+  white-space: nowrap;
 }
 
-@import url('https://fonts.googleapis.com/css?family=Orbitron&display=swap');
-@import url('https://fonts.googleapis.com/css?family=Hind&display=swap');
-
-/* Card search styles */
-
-:root {
-  --search-card-radius: 10px;
-}
-
-.Card {
-  padding: 1px;
-  border-radius: var(--search-card-radius);
-  background: linear-gradient(
-    -67deg,
-    rgba(200, 216, 231, 0.7),
-    rgba(255, 255, 255, 0.8)
-  );
-  overflow: hidden;
-  width: 380px;
-  margin: 20px;
-}
-
-.CardInner {
-  padding: 16px;
-  background-color: #e2e9f4;
-  border-radius: var(--search-card-radius);
-}
-
-.SearchCard-container {
-  display: flex;
-  align-items: stretch;
-}
-
-.Icon {
-  min-width: 46px;
-  min-height: 46px;
+.controls {
   display: flex;
   align-items: center;
-  justify-content: center;
-  border-radius: var(--search-card-radius);
-  margin-right: 12px;
-
-}
-
-.Icon svg {
-  transform: translate(-1px, -1px);
-}
-
-.CardInner label {
-  font-family: 'Hind', sans-serif;
-  display: block;
-  margin-bottom: 12px;
-  background: linear-gradient(45deg, #6b7b8f, #3c4b66);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-}
-
-.InputContainer {
-  width: 100%;
-  position: relative;
-  border-radius: var(--search-card-radius);
-  overflow: hidden;
-}
-
-.InputContainer::before,
-.InputContainer::after {
-  left: 0;
-  top: 0;
-  display: block;
-  content: "";
-  pointer-events: none;
-  width: 100%;
-  height: 100%;
-  position: absolute;
-}
-
-.InputContainer::before {
-  box-shadow: inset -2px -2px 4px rgba(255, 255, 255, 0.7);
-}
-
-.InputContainer::after {
-  box-shadow:
-    inset 1px 1px 3px #c5d4e3,
-    inset 2px 2px 6px #c5d4e3;
-}
-
-.InputContainer input {
-  background-color: #e3edf7;
-  padding: 16px 32px;
-  border: none;
-  display: block;
-  font-family: 'Orbitron', sans-serif;
-  font-weight: 600;
-  color: #a9b8c9;
-  -webkit-appearance: none;
-  transition: all 240ms ease-out;
-  width: 100%;
-  position: relative;
-  z-index: 1; /* above ::before/::after */
-}
-
-.InputContainer input::placeholder {
-  color: #6d7f8f;
-}
-
-.InputContainer input:focus {
-  outline: none;
-  color: #6d7f8f;
-  background-color: #edf3fb; /* approximate lighten(#e3edf7, 3%) */
-}
-
-/* Align card + buttons nicely */
-.search-form {
-  display: flex;
-  align-items: center;
-  justify-content: start;
   gap: 12px;
+  margin-top: 16px;
 }
 
-.search-card-button {
-  height: 48px;
-  display: inline-flex;
+.status-message {
+  margin-left: 8px;
+  font-size: 0.9rem;
+}
+
+.results-wrapper {
+  margin-top: 24px;
+}
+
+.results-table .row-red {
+  background-color: #fdd;
+}
+
+.results-table .row-green {
+  background-color: #dfffe0;
+}
+
+.results-header {
+  display: flex;
   align-items: center;
-  justify-content: center;
-  padding: 0 18px;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.button.small {
+  font-size: 0.8rem;
+  padding: 4px 10px;
 }
