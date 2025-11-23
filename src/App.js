@@ -275,6 +275,7 @@ function App() {
 
   return (
     <div className="App">
+      <h1>INVOICE CHECKER</h1>
       {/* Top buttons */}
       <div className="controls">
         <button className="button" onClick={handleRunCheck}>
