@@ -1,6 +1,6 @@
 @import url('https://fonts.googleapis.com/css2?family=Zen+Dots&display=swap');
 
-h1 h2 h3 p {
+h1, h2, h3, p {
   font-family: "Zen Dots", sans-serif;
   font-weight: 400;
   font-style: normal;
