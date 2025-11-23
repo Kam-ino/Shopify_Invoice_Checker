@@ -23,7 +23,14 @@ const COUNTRY_COLUMNS = {
   BE: { total: "Total to BE", upsell: "Upsell to BE" },
   CH: { total: "Total to CH", upsell: "Upsell to CH" },
   // In the provided file, this header actually has spaces before CA
-  CA: { total: "Total to CA", upsell: "Upsell to    CA" },
+  CA: { total: "Total to CA", upsell: "Upsell to CA" },
+  CZ: { total: "Total to CZ", upsell: "Upsell to CZ" },
+  SK: { total: "Total to SK", upsell: "Upsell to SK" },
+  RO: { total: "Total to RO", upsell: "Upsell to RO" },
+  ES: { total: "Total to ES", upsell: "Upsell to ES" },
+  IT: { total: "Total to IT", upsell: "Upsell to IT" },
+  GR: { total: "Total to GR", upsell: "Upsell to GR" },
+  BE: { total: "Total to BE", upsell: "Upsell to BE" },
 };
 
 // Build index from Oct prices: index[SKU][QTY] = row
