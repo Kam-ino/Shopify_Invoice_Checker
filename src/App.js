@@ -275,7 +275,7 @@ function App() {
 
   return (
     <div className="App">
-      <h1>INVOICE CHECKER</h1>
+      <h1 style={{color:"#fff"}}>INVOICE CHECKER</h1>
       {/* Top buttons */}
       <div className="controls">
         <button className="button" onClick={handleRunCheck}>
@@ -289,8 +289,8 @@ function App() {
 
       {/* Upload tables */}
       <div className="side-by-side">
-        <Table title="Orders tracking & costs" onDataChange={setOrdersFile} />
-        <Table title="October prices" onDataChange={setPricesFile} />
+        <Table title="ORDER TRACKING & COSTS" onDataChange={setOrdersFile} />
+        <Table title="PRICES" onDataChange={setPricesFile} />
       </div>
 
       {/* Results table */}

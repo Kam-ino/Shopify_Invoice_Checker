@@ -125,7 +125,7 @@ function Table({ title, onDataChange }) {
             </table>
           </div>
         ) : (
-          <div>No file is uploaded yet.</div>
+          <p>No file is uploaded yet.</p>
         )}
       </div>
     </div>
