@@ -291,25 +291,25 @@ function App() {
       {/* Top buttons */}
       <div className="controls">
         <button className="button" onClick={handleRunCheck}>
-          Run check
+          RUN PROGRAM
         </button>
         <button className="button secondary" onClick={handleDownload}>
-          Download corrected Orders file
+          DOWNLOAD FILES WITH CORRECTION
         </button>
         {message && <div className="status-message">{message}</div>}
       </div>
 
       {/* Upload tables */}
       <div className="side-by-side">
-        <Table title="Orders tracking & costs" onDataChange={setOrdersFile} />
-        <Table title="October prices" onDataChange={setPricesFile} />
+        <Table title="ORDER TRACKING & COSTS" onDataChange={setOrdersFile} />
+        <Table title="PRICES" onDataChange={setPricesFile} />
       </div>
 
       {/* Results table */}
       {results && results.length > 0 && (
         <div className="results-wrapper">
           <div className="results-header">
-            <h2>Order check results</h2>
+            <h2>INVOICE CHECK RESULTS</h2>
             <button
               type="button"
               className="button small"

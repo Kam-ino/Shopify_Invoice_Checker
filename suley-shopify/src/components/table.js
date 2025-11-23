@@ -92,7 +92,7 @@ function Table({ title, onDataChange }) {
           style={{ display: "none" }}
         />
         <label htmlFor={title} className="button">
-          UPLOAD
+          UPLOAD FILE
         </label>
 
         {typeError && (
@@ -114,7 +114,7 @@ function Table({ title, onDataChange }) {
                 </tr>
               </thead>
               <tbody>
-                {rows.slice(0, 50).map((row, index) => (
+                {rows.slice(0, 9999).map((row, index) => (
                   <tr key={index}>
                     {columns.map((col) => (
                       <td key={col}>{row[col]}</td>
@@ -123,11 +123,6 @@ function Table({ title, onDataChange }) {
                 ))}
               </tbody>
             </table>
-            {rows.length > 50 && (
-              <p style={{ fontSize: "0.8rem", marginTop: "4px" }}>
-                Showing first 50 rows…
-              </p>
-            )}
           </div>
         ) : (
           <div>No file is uploaded yet.</div>
