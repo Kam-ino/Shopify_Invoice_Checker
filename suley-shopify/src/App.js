@@ -1,7 +1,7 @@
 import "./App.css";
 import React, { useState } from "react";
 import Table from "./components/table";
-import * as XLSX from "xlsx";
+import * as XLSX from "xlsx-js-style";
 
 // Helper to parse totals from Oct prices (strip currency etc)
 function parsePrice(val) {
@@ -226,60 +226,47 @@ function App() {
       return;
     }
 
-    // Map order -> status so we can color cells
-    const statusByOrder = {};
-    results.forEach((r) => {
-      statusByOrder[String(r.order)] = r.status;
-    });
-
     const wb = XLSX.utils.book_new();
     const ws = XLSX.utils.json_to_sheet(correctedOrders.rows, {
       header: correctedOrders.columns,
     });
 
-    // Find column indexes we care about
     const cols = correctedOrders.columns;
-    const orderColIndex = cols.indexOf("Order#");
-    const totalColIndex = cols.indexOf("Total");
     const correctedColIndex = cols.indexOf("Corrected Total");
 
-    // Excel row 1 (r = 0) is header; data starts at r = 1
+    // For each data row: if "Corrected Total" has content, color the whole row red (#FFFFC7CE)
     correctedOrders.rows.forEach((row, rowIdx) => {
-      const orderVal = row["Order#"];
-      const status = statusByOrder[String(orderVal)];
-      if (!status) return; // no info, skip
-
-      let fillRgb = null;
-      if (status === "mismatch") {
-        // light red
-        fillRgb = "FFFFC7CE";
-      } else if (status === "ok") {
-        // light green
-        fillRgb = "FFC6EFCE";
+      const correctedVal = row["Corrected Total"];
+      if (
+        correctedVal === null ||
+        correctedVal === undefined ||
+        correctedVal === ""
+      ) {
+        return; // no correction: skip coloring
       }
 
-      if (!fillRgb) return;
+      const fillRgb = "FFAFAF"; // light red
 
-      const applyFill = (colIndex) => {
-        if (colIndex < 0) return;
+      cols.forEach((colName, colIndex) => {
         const addr = XLSX.utils.encode_cell({
-          r: rowIdx + 1, // +1 for header row
+          r: rowIdx + 1, // +1 because row 0 is header
           c: colIndex,
         });
+
         if (!ws[addr]) {
-          ws[addr] = { t: "n", v: row[cols[colIndex]] ?? "" };
+          const cellVal = row[colName];
+          ws[addr] = {
+            t: typeof cellVal === "number" ? "n" : "s",
+            v: cellVal ?? "",
+          };
         }
+
         ws[addr].s = ws[addr].s || {};
         ws[addr].s.fill = {
           patternType: "solid",
           fgColor: { rgb: fillRgb },
         };
-      };
-
-      // Color the original Total column
-      applyFill(totalColIndex);
-      // And also the Corrected Total column if you want that colored too
-      applyFill(correctedColIndex);
+      });
     });
 
     XLSX.utils.book_append_sheet(wb, ws, "Sheet1");
@@ -294,15 +281,15 @@ function App() {
           RUN PROGRAM
         </button>
         <button className="button secondary" onClick={handleDownload}>
-          DOWNLOAD FILES WITH CORRECTION
+          DOWNLOAD CORRECTED INVOICE FILE
         </button>
         {message && <div className="status-message">{message}</div>}
       </div>
 
       {/* Upload tables */}
       <div className="side-by-side">
-        <Table title="ORDER TRACKING & COSTS" onDataChange={setOrdersFile} />
-        <Table title="PRICES" onDataChange={setPricesFile} />
+        <Table title="Orders tracking & costs" onDataChange={setOrdersFile} />
+        <Table title="October prices" onDataChange={setPricesFile} />
       </div>
 
       {/* Results table */}
