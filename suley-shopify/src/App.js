@@ -226,10 +226,62 @@ function App() {
       return;
     }
 
+    // Map order -> status so we can color cells
+    const statusByOrder = {};
+    results.forEach((r) => {
+      statusByOrder[String(r.order)] = r.status;
+    });
+
     const wb = XLSX.utils.book_new();
     const ws = XLSX.utils.json_to_sheet(correctedOrders.rows, {
       header: correctedOrders.columns,
     });
+
+    // Find column indexes we care about
+    const cols = correctedOrders.columns;
+    const orderColIndex = cols.indexOf("Order#");
+    const totalColIndex = cols.indexOf("Total");
+    const correctedColIndex = cols.indexOf("Corrected Total");
+
+    // Excel row 1 (r = 0) is header; data starts at r = 1
+    correctedOrders.rows.forEach((row, rowIdx) => {
+      const orderVal = row["Order#"];
+      const status = statusByOrder[String(orderVal)];
+      if (!status) return; // no info, skip
+
+      let fillRgb = null;
+      if (status === "mismatch") {
+        // light red
+        fillRgb = "FFFFC7CE";
+      } else if (status === "ok") {
+        // light green
+        fillRgb = "FFC6EFCE";
+      }
+
+      if (!fillRgb) return;
+
+      const applyFill = (colIndex) => {
+        if (colIndex < 0) return;
+        const addr = XLSX.utils.encode_cell({
+          r: rowIdx + 1, // +1 for header row
+          c: colIndex,
+        });
+        if (!ws[addr]) {
+          ws[addr] = { t: "n", v: row[cols[colIndex]] ?? "" };
+        }
+        ws[addr].s = ws[addr].s || {};
+        ws[addr].s.fill = {
+          patternType: "solid",
+          fgColor: { rgb: fillRgb },
+        };
+      };
+
+      // Color the original Total column
+      applyFill(totalColIndex);
+      // And also the Corrected Total column if you want that colored too
+      applyFill(correctedColIndex);
+    });
+
     XLSX.utils.book_append_sheet(wb, ws, "Sheet1");
     XLSX.writeFile(wb, "Orders_tracking_corrected.xlsx");
   };
