@@ -1,19 +1,13 @@
 import "./App.css";
-<<<<<<< Updated upstream
-import React, { useState } from "react";
-=======
 import React, { useState, useEffect, useMemo } from "react";
 import axios from "axios";
->>>>>>> Stashed changes
 import Table from "./components/table";
 import * as XLSX from "xlsx-js-style";
+import ShopifyTable from "./components/ShopifyTable";
 
-<<<<<<< Updated upstream
 // Helper to parse totals from Oct prices (strip currency etc)
-=======
 /* ---------------- Existing helpers ---------------- */
 
->>>>>>> Stashed changes
 function parsePrice(val) {
   if (val === null || val === undefined || val === "") return NaN;
   if (typeof val === "number") return val;
@@ -36,7 +30,6 @@ const COUNTRY_COLUMNS = {
   ES: { total: "Total to ES", upsell: "Upsell to ES" },
   IT: { total: "Total to IT", upsell: "Upsell to IT" },
   GR: { total: "Total to GR", upsell: "Upsell to GR" },
-  BE: { total: "Total to BE", upsell: "Upsell to BE" },
 };
 
 function buildPriceIndex(pricesRows) {
@@ -291,8 +284,6 @@ function App() {
   const [correctedOrders, setCorrectedOrders] = useState(null);
   const [message, setMessage] = useState("");
   const [resultsSortDir, setResultsSortDir] = useState("asc");
-<<<<<<< Updated upstream
-=======
 
   // Shopify
   const [shopifyError, setShopifyError] = useState("");
@@ -418,7 +409,6 @@ function App() {
 
     fetchOrders();
   }, []);
->>>>>>> Stashed changes
 
   const handleRunCheck = () => {
     if (!ordersFile || !ordersFile.rows || !pricesFile || !pricesFile.rows) {
@@ -710,12 +700,8 @@ function App() {
       <div className="side-by-side">
         <Table title="ORDER TRACKING & COSTS" onDataChange={setOrdersFile} />
         <Table title="PRICES" onDataChange={setPricesFile} />
-<<<<<<< Updated upstream
-=======
-
         {/* ✅ Pass filtered orders so removed items don't show in ShopifyTable */}
         <ShopifyTable title="SHOPIFY" data={filteredShopifyOrders} error={shopifyError} />
->>>>>>> Stashed changes
       </div>
 
       {results && results.length > 0 && (

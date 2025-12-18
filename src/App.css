@@ -85,36 +85,8 @@
   width: fit-content;
 }
 
-<<<<<<< Updated upstream
 /* === Fancy radio-driven dropdown === */
 
-=======
-/* Small variant */
-.button-small {
-  padding: 8px 14px;
-  min-height: 36px;
-  font-size: 14px;
-  border-radius: 12px;
-
-  /* Important: prevents your buttons stacking full-width */
-  width: auto;
-  max-width: none;
-}
-
-/* Optional: if your layout tries to stretch buttons */
-.pagination-controls .button-small {
-  flex: 0 0 auto;
-}
-
-.pagination-controls {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-  margin-top: 10px;
-}
-/* ===== DROPDOWN SELECT STYLES (unchanged) ===== */
->>>>>>> Stashed changes
 .brand-select-form {
   /* keep it inline with your controls row */
   display: inline-block;
