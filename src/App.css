@@ -4,12 +4,14 @@
   min-height: 100vh;
   height: fit-content;
   padding: 1px;
+  overflow: hidden;
 }
 
 .side-by-side {
   display: flex;
   gap: 20px;
   align-items: flex-start;
+  flex-wrap: wrap;
   margin-top: 20px;
 }
 
