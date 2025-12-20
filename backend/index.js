@@ -5,95 +5,159 @@ const cors = require("cors");
 
 const app = express();
 app.use(cors());
-app.use(express.json());
 
 const PORT = process.env.PORT || 4000;
-
-const SHOP = process.env.SHOPIFY_STORE_DOMAIN; // e.g. "your-store.myshopify.com"
-const TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
 const API_VERSION = process.env.SHOPIFY_API_VERSION || "2025-10";
 
-if (!SHOP || !TOKEN) {
-  console.error("Missing env vars. Set SHOPIFY_STORE_DOMAIN and SHOPIFY_ACCESS_TOKEN in backend/.env");
-  process.exit(1);
-}
+const STORES = {
+  bloomommy: {
+    domainEnv: "BLOOMOMMY_SHOPIFY_STORE_DOMAIN",
+    clientIdEnv: "BLOOMOMMY_SHOPIFY_CLIENT_ID",
+    clientSecretEnv: "BLOOMOMMY_SHOPIFY_CLIENT_SECRET",
+    accessTokenEnv: "BLOOMOMMY_SHOPIFY_ACCESS_TOKEN",
+  },
+  cellumove: {
+    domainEnv: "CELLUMOVE_SHOPIFY_STORE_DOMAIN",
+    clientIdEnv: "CELLUMOVE_SHOPIFY_CLIENT_ID",
+    clientSecretEnv: "CELLUMOVE_SHOPIFY_CLIENT_SECRET",
+    accessTokenEnv: "CELLUMOVE_SHOPIFY_ACCESS_TOKEN",
+  },
+  yuma: {
+    domainEnv: "YUMA_SHOPIFY_STORE_DOMAIN",
+    clientIdEnv: "YUMA_SHOPIFY_CLIENT_ID",
+    clientSecretEnv: "YUMA_SHOPIFY_CLIENT_SECRET",
+    accessTokenEnv: "YUMA_SHOPIFY_ACCESS_TOKEN",
+  },
+};
 
-const GRAPHQL_URL = `https://${SHOP}/admin/api/${API_VERSION}/graphql.json`;
+// storeKey -> { token, expiresAtMs }
+const tokenCache = new Map();
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function parseOrderNumber(name) {
-  // "#19027" -> 19027
-  const n = parseInt(String(name || "").replace(/\D/g, ""), 10);
-  return Number.isFinite(n) ? n : null;
+function envTrim(name) {
+  return String(process.env[name] || "").trim();
+}
+function mustEnv(name) {
+  const v = envTrim(name);
+  if (!v) throw new Error(`Missing ${name} in .env`);
+  return v;
+}
+function tokenSuffix(token) {
+  const t = String(token || "");
+  return t.length >= 6 ? t.slice(-6) : t;
 }
 
-async function shopifyGraphQL(query, variables = {}) {
-  const resp = await axios.post(
-    GRAPHQL_URL,
-    { query, variables },
-    {
-      headers: {
-        "Content-Type": "application/json",
-        "X-Shopify-Access-Token": TOKEN,
-      },
-      timeout: 60_000,
-    }
-  );
-
-  // GraphQL errors can come back with HTTP 200
-  if (resp.data?.errors?.length) {
-    const msg = resp.data.errors.map((e) => e.message).join(" | ");
-    const lower = msg.toLowerCase();
-    const isThrottled = lower.includes("throttled") || lower.includes("throttle");
-
-    if (isThrottled) {
-      // Back off a bit and let caller retry
-      const throttleStatus = resp.data?.extensions?.cost?.throttleStatus;
-      const retryMs = throttleStatus?.restoreRate ? 1200 : 1500;
-      const err = new Error(`THROTTLED:${msg}`);
-      err.retryMs = retryMs;
-      throw err;
-    }
-
-    throw new Error(msg);
+function getStoreCfg(storeKeyRaw) {
+  const storeKey = String(storeKeyRaw || "bloomommy").toLowerCase();
+  const cfg = STORES[storeKey];
+  if (!cfg) {
+    throw new Error(`Invalid store "${storeKey}". Use: ${Object.keys(STORES).join(", ")}`);
   }
 
-  return resp.data?.data;
+  const domain = mustEnv(cfg.domainEnv);
+  const staticToken = envTrim(cfg.accessTokenEnv);
+  const clientId = envTrim(cfg.clientIdEnv);
+  const clientSecret = envTrim(cfg.clientSecretEnv);
+
+  return { storeKey, domain, staticToken, clientId, clientSecret };
 }
 
-async function getAccessScopesViaGraphQL() {
-  const query = `
-    query {
-      currentAppInstallation {
-        accessScopes { handle }
-      }
+async function fetchClientCredentialsToken({ domain, clientId, clientSecret }) {
+  if (!clientId || !clientSecret) {
+    throw new Error(
+      `Missing client credentials for ${domain}. Set *_SHOPIFY_CLIENT_ID and *_SHOPIFY_CLIENT_SECRET in .env`
+    );
+  }
+
+  const url = `https://${domain}/admin/oauth/access_token`;
+  const body = new URLSearchParams();
+  body.append("grant_type", "client_credentials");
+  body.append("client_id", clientId);
+  body.append("client_secret", clientSecret);
+
+  const resp = await axios.post(url, body.toString(), {
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    timeout: 30000,
+  });
+
+  const token = resp.data?.access_token;
+  const expiresIn = Number(resp.data?.expires_in ?? 0); // usually ~86399 seconds
+
+  if (!token) throw new Error(`No access_token returned for ${domain}`);
+
+  const effectiveExpiresIn = (expiresIn || 86399) - 60; // refresh early
+  const expiresAtMs = Date.now() + Math.max(1, effectiveExpiresIn) * 1000;
+
+  return { token, expiresAtMs };
+}
+
+async function getAccessTokenForStore(storeKey, { forceRefresh = false } = {}) {
+  const cfg = getStoreCfg(storeKey);
+
+  // Prefer static env token if provided (shpat_...)
+  if (cfg.staticToken) {
+    return { store: cfg.storeKey, domain: cfg.domain, token: cfg.staticToken, source: "env" };
+  }
+
+  if (!forceRefresh) {
+    const cached = tokenCache.get(cfg.storeKey);
+    if (cached?.token && cached.expiresAtMs > Date.now()) {
+      return { store: cfg.storeKey, domain: cfg.domain, token: cached.token, source: "cache" };
     }
-  `;
+  }
+
+  const fresh = await fetchClientCredentialsToken(cfg);
+  tokenCache.set(cfg.storeKey, fresh);
+  return { store: cfg.storeKey, domain: cfg.domain, token: fresh.token, source: "oauth" };
+}
+
+async function shopifyGraphql({ domain, token, query, variables }) {
+  const graphqlUrl = `https://${domain}/admin/api/${API_VERSION}/graphql.json`;
 
   try {
-    const data = await shopifyGraphQL(query);
-    return data?.currentAppInstallation?.accessScopes?.map((s) => s.handle) ?? [];
-  } catch (e) {
-    console.warn("Could not read access scopes via GraphQL:", e.message);
-    return null;
+    const resp = await axios.post(
+      graphqlUrl,
+      { query, variables: variables || {} },
+      {
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": token,
+        },
+        timeout: 60000,
+      }
+    );
+
+    // GraphQL errors come back as 200 with errors[]
+    if (resp.data?.errors?.length) {
+      const e = new Error("Shopify GraphQL returned errors");
+      e.shopifyStatus = 200;
+      e.shopifyData = resp.data;
+      throw e;
+    }
+
+    return resp.data?.data;
+  } catch (err) {
+    const status = err?.response?.status ?? err.shopifyStatus ?? null;
+    const data = err?.response?.data ?? err.shopifyData ?? null;
+
+    const e = new Error(err.message || "Shopify request failed");
+    e.shopifyStatus = status;
+    e.shopifyData = data;
+    throw e;
   }
 }
 
-async function fetchAllOrders({
-  searchQuery = "status:any",
-  stopAtOrderNumber = null,
-  maxPages = null,
-} = {}) {
-  const QUERY = `
-    query Orders($first: Int!, $after: String, $query: String!) {
-      orders(
-        first: $first,
-        after: $after,
-        query: $query,
-        sortKey: CREATED_AT,
-        reverse: true
-      ) {
+/**
+ * ✅ Fetch ALL orders using cursor pagination.
+ * Options:
+ * - limit: stop after N orders (for quick tests)
+ * - maxPages: stop after N pages (each page up to 250)
+ */
+async function fetchAllOrders({ domain, token, limit = 0, maxPages = 0 }) {
+  const query = `
+    query OrdersPage($first: Int!, $after: String) {
+      orders(first: $first, after: $after) {
         pageInfo { hasNextPage endCursor }
         edges {
           node {
@@ -102,23 +166,14 @@ async function fetchAllOrders({
             createdAt
             displayFinancialStatus
             displayFulfillmentStatus
-
             customer { firstName lastName email }
-
-            billingAddress {
-              address1
-              address2
-              city
-              province
-              country
-              zip
-            }
-
+            billingAddress { address1 address2 city province country zip }
             lineItems(first: 50) {
               edges {
                 node {
                   title
                   quantity
+                  variantTitle
                   fulfillableQuantity
                   fulfillmentStatus
                   variant { id title }
@@ -131,102 +186,144 @@ async function fetchAllOrders({
     }
   `;
 
-  let after = null;
   const all = [];
-  let pages = 0;
+  let after = null;
+  let page = 0;
 
   while (true) {
-    try {
-      const data = await shopifyGraphQL(QUERY, {
-        first: 250,
-        after,
-        query: searchQuery,
-      });
+    page += 1;
 
-      const conn = data?.orders;
-      if (!conn) throw new Error("No orders connection returned.");
+    const data = await shopifyGraphql({
+      domain,
+      token,
+      query,
+      variables: { first: 250, after },
+    });
 
-      const batch = conn.edges.map((e) => e.node);
-      all.push(...batch);
-      pages++;
+    const conn = data?.orders;
+    const edges = conn?.edges || [];
+    const nodes = edges.map((e) => e.node).filter(Boolean);
 
-      // Optional safety: stop after N pages (debug)
-      if (Number.isFinite(maxPages) && maxPages > 0 && pages >= maxPages) break;
+    all.push(...nodes);
 
-      // Optional early stop when we reach a specific order number (e.g. 18000)
-      if (stopAtOrderNumber != null) {
-        // Because we paginate from newest -> older, once we SEE <= stopAt, we can stop.
-        const hit = batch.some((o) => {
-          const num = parseOrderNumber(o.name);
-          return num != null && num <= stopAtOrderNumber;
-        });
-        if (hit) break;
-      }
+    const hasNext = !!conn?.pageInfo?.hasNextPage;
+    const endCursor = conn?.pageInfo?.endCursor || null;
 
-      if (!conn.pageInfo.hasNextPage) break;
-      after = conn.pageInfo.endCursor;
-    } catch (e) {
-      // Throttling retry
-      if (String(e.message || "").startsWith("THROTTLED:")) {
-        await sleep(e.retryMs || 1500);
-        continue;
-      }
-      throw e;
+    // Stop conditions
+    if (limit > 0 && all.length >= limit) {
+      return all.slice(0, limit);
     }
-  }
+    if (maxPages > 0 && page >= maxPages) {
+      return all;
+    }
+    if (!hasNext) {
+      return all;
+    }
 
-  return { orders: all, pages };
+    after = endCursor;
+
+    // Small delay to reduce throttle risk
+    await sleep(200);
+  }
 }
 
-// --- Routes ---
-
-// Health check
-app.get("/health", (req, res) => res.json({ ok: true }));
-
-// GET /api/orders
-// Optional query params:
-//   q=status:any
-//   stopAt=18000         (stop once we reach order number <= 18000)
-//   maxPages=10          (debug)
+/**
+ * GET /api/orders?store=bloomommy|cellumove|yuma
+ * Optional:
+ *   &limit=500        -> only first 500 orders (debug)
+ *   &maxPages=3       -> only first 3 pages (debug)
+ */
 app.get("/api/orders", async (req, res) => {
+  const store = String(req.query.store || "bloomommy").toLowerCase();
+  const limit = Number(req.query.limit || 0) || 0;
+  const maxPages = Number(req.query.maxPages || 0) || 0;
+
   try {
-    const q = (req.query.q && String(req.query.q).trim()) || "status:any";
+    // get token
+    let auth = await getAccessTokenForStore(store);
 
-    const stopAt = req.query.stopAt ? Number(req.query.stopAt) : null;
-    const stopAtOrderNumber = Number.isFinite(stopAt) ? stopAt : null;
+    console.log(
+      `[orders] store=${store} domain=${auth.domain} source=${auth.source} tokenSuffix=${tokenSuffix(auth.token)}`
+    );
 
-    const maxPagesRaw = req.query.maxPages ? Number(req.query.maxPages) : null;
-    const maxPages = Number.isFinite(maxPagesRaw) ? maxPagesRaw : null;
+    // fetch all orders (with retry-on-401 for oauth/cache tokens)
+    try {
+      const orders = await fetchAllOrders({
+        domain: auth.domain,
+        token: auth.token,
+        limit,
+        maxPages,
+      });
 
-    const result = await fetchAllOrders({
-      searchQuery: q,
-      stopAtOrderNumber,
-      maxPages,
-    });
+      const pages = Math.max(1, Math.ceil(orders.length / 250));
 
-    res.json({
-      count: result.orders.length,
-      pages: result.pages,
-      orders: result.orders,
-    });
+      return res.json({
+        store,
+        count: orders.length,
+        pages,
+        orders,
+      });
+    } catch (err) {
+      // If 401 and token is from oauth/cache, clear & retry once
+      const status = err.shopifyStatus;
+
+      if (status === 401 && (auth.source === "oauth" || auth.source === "cache")) {
+        console.warn(`[orders] 401 for ${store} using ${auth.source}. Clearing cache and retrying once...`);
+        tokenCache.delete(store);
+
+        auth = await getAccessTokenForStore(store, { forceRefresh: true });
+
+        console.log(
+          `[orders] RETRY store=${store} domain=${auth.domain} source=${auth.source} tokenSuffix=${tokenSuffix(auth.token)}`
+        );
+
+        const orders = await fetchAllOrders({
+          domain: auth.domain,
+          token: auth.token,
+          limit,
+          maxPages,
+        });
+
+        const pages = Math.max(1, Math.ceil(orders.length / 250));
+
+        return res.json({
+          store,
+          count: orders.length,
+          pages,
+          orders,
+        });
+      }
+
+      console.error("=== /api/orders ERROR ===");
+      console.error("store:", store);
+      console.error("domain:", auth.domain);
+      console.error("source:", auth.source);
+      console.error("tokenSuffix:", tokenSuffix(auth.token));
+      console.error("status:", err.shopifyStatus);
+      console.error("data:", JSON.stringify(err.shopifyData, null, 2));
+      console.error("message:", err.message);
+
+      return res.status(500).json({
+        store,
+        status: err.shopifyStatus || null,
+        error: err.shopifyData || err.message,
+      });
+    }
   } catch (err) {
-    console.error("API /api/orders error:", err.message || err);
-    res.status(500).json({ error: err.message || "Unknown error" });
+    console.error("=== /api/orders TOP-LEVEL ERROR ===");
+    console.error("store:", store);
+    console.error("status:", err.shopifyStatus);
+    console.error("data:", JSON.stringify(err.shopifyData, null, 2));
+    console.error("message:", err.message);
+
+    return res.status(500).json({
+      store,
+      status: err.shopifyStatus || null,
+      error: err.shopifyData || err.message || "Failed to fetch orders",
+    });
   }
 });
 
-// --- Start ---
-app.listen(PORT, async () => {
-  console.log(`Server running: http://localhost:${PORT}`);
-  console.log(`Orders endpoint: http://localhost:${PORT}/api/orders`);
-
-  const scopes = await getAccessScopesViaGraphQL();
-  if (scopes) {
-    console.log("Token scopes:", scopes.join(", "));
-    if (!scopes.includes("read_all_orders")) {
-      console.warn(
-        "WARNING: Token is missing read_all_orders. You must reinstall/reauthorize the app to generate a NEW token."
-      );
-    }
-  }
+app.listen(PORT, () => {
+  console.log(`Server running: http://localhost:${PORT}/api/orders`);
 });

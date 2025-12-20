@@ -192,29 +192,30 @@ const shouldKeepShopifyLineItem = (node) => {
   if (!title) return false;
 
   // exclude E-book always
-  if (title.toLowerCase().includes("e-book")) return false;
+  const t = title.toLowerCase();
+  if (t.includes("e-book") || t.includes("ebook")) return false;
 
-  // quantity/currentQuantity fallback
   const qty = Number(node.currentQuantity ?? node.quantity ?? 0) || 0;
   if (qty <= 0) return false;
 
   const hasFQ = node.fulfillableQuantity !== undefined && node.fulfillableQuantity !== null;
   const hasFS = node.fulfillmentStatus !== undefined && node.fulfillmentStatus !== null;
 
-  // If backend provides these, enforce them:
   if (hasFQ || hasFS) {
     const fq = Number(node.fulfillableQuantity ?? 0) || 0;
     const fs = String(node.fulfillmentStatus ?? "").toUpperCase();
     return fs === "FULFILLED" || fq > 0;
   }
 
-  // If not available, do not break behavior
   return true;
 };
 
+/**
+ * ✅ Tracking signature: (item title, qty) ONLY
+ *    Variant is intentionally ignored.
+ */
 const buildTrackingSignature = (orderRows, columns) => {
   const qtyCol = findColumn(columns, ["QTY", "Quantity"]);
-  const variantCol = findColumn(columns, ["Variant"]);
   const lineItemsCol = findColumn(columns, ["Line Items"]);
   const itemNameCol = findColumn(columns, ["Item name", "Item Name", "Item"]);
 
@@ -227,26 +228,28 @@ const buildTrackingSignature = (orderRows, columns) => {
     if (qty <= 0) continue;
 
     let item = "";
-    let variant = "";
 
     if (lineItemsCol) item = normText(r?.[lineItemsCol]);
-    if (variantCol) variant = normText(r?.[variantCol]);
 
+    // If the "Item name" column contains "Item - Variant", strip variant from it
     if (!item && itemNameCol) {
       const sp = splitItemAndVariant(r?.[itemNameCol]);
-      item = item || sp.item;
-      variant = variant || sp.variant;
+      item = sp.item;
     }
 
     if (!item) continue;
 
-    sigs.push(`${item.toLowerCase()}||${variant.toLowerCase()}||${qty}`);
+    sigs.push(`${item.toLowerCase()}||${qty}`);
   }
 
   sigs.sort();
   return sigs;
 };
 
+/**
+ * ✅ Shopify signature: (item title, qty) ONLY
+ *    Variant is intentionally ignored.
+ */
 const buildShopifySignature = (shopifyOrder) => {
   const edges = shopifyOrder?.lineItems?.edges ?? [];
   const sigs = [];
@@ -256,13 +259,10 @@ const buildShopifySignature = (shopifyOrder) => {
     if (!shouldKeepShopifyLineItem(node)) continue;
 
     const title = normText(node.title);
-    let variant = normText(node?.variant?.title);
-    if (variant.toLowerCase() === "default title") variant = "";
-
     const qty = Number(node.currentQuantity ?? node.quantity ?? 0) || 0;
-    if (qty <= 0) continue;
+    if (!title || qty <= 0) continue;
 
-    sigs.push(`${title.toLowerCase()}||${variant.toLowerCase()}||${qty}`);
+    sigs.push(`${title.toLowerCase()}||${qty}`);
   }
 
   sigs.sort();
@@ -286,9 +286,10 @@ function App() {
   const [resultsSortDir, setResultsSortDir] = useState("asc");
 
   // Shopify
+  const [selectedStore, setSelectedStore] = useState("bloomommy"); // default
+  const [shopifyLoading, setShopifyLoading] = useState(false);
   const [shopifyError, setShopifyError] = useState("");
   const [orders, setOrders] = useState([]);
-  const [shopifyLoading, setShopifyLoading] = useState(false);
 
   const [orderSearch, setOrderSearch] = useState("");
 
@@ -393,22 +394,26 @@ function App() {
   useEffect(() => {
     const fetchOrders = async () => {
       setShopifyLoading(true);
+      setShopifyError("");
+
       try {
-        setShopifyError("");
-        const response = await axios.get("http://localhost:4000/api/orders");
+        const response = await axios.get("http://localhost:4000/api/orders", {
+          params: { store: selectedStore },
+        });
+
         const apiOrders = response.data?.orders;
         setOrders(Array.isArray(apiOrders) ? apiOrders : []);
       } catch (err) {
         console.error("Error fetching orders:", err);
         setOrders([]);
-        setShopifyError("Failed to load Shopify orders (check API server).");
+        setShopifyError(err?.response?.data?.error || "Failed to load Shopify orders (check API server).");
       } finally {
         setShopifyLoading(false);
       }
     };
 
     fetchOrders();
-  }, []);
+  }, [selectedStore]);
 
   const handleRunCheck = () => {
     if (!ordersFile || !ordersFile.rows || !pricesFile || !pricesFile.rows) {
@@ -453,6 +458,7 @@ function App() {
       let itemsCompared = 0;
 
       if (shopifyOrderForCompare) {
+        // ✅ Variant ignored in both signatures
         const trackingSig = buildTrackingSignature(orderRows, trackingCols);
         const shopifySig = buildShopifySignature(shopifyOrderForCompare);
         itemsCompared = trackingSig.length;
@@ -539,7 +545,6 @@ function App() {
 
   return (
     <div className="App">
-      {/* Optional: if you already added the CSS I sent earlier, this blocks interaction */}
       {shopifyLoading && (
         <div className="loading-overlay" role="alert" aria-busy="true">
           <div className="loading-card">
@@ -560,6 +565,29 @@ function App() {
           DOWNLOAD CORRECTED INVOICE FILE
         </button>
         {message && <div className="status-message">{message}</div>}
+
+        <div style={{ display: "flex", gap: 12, alignItems: "center", marginLeft: 20, marginTop: 10 }}>
+          <label style={{ color: "#fff", fontWeight: 700 }}>Store:</label>
+
+          <select
+            value={selectedStore}
+            onChange={(e) => setSelectedStore(e.target.value)}
+            disabled={shopifyLoading}
+            style={{
+              padding: "8px 10px",
+              borderRadius: 10,
+              border: "1px solid rgba(255,255,255,0.25)",
+              outline: "none",
+            }}
+          >
+            <option value="bloomommy">bloomommy</option>
+            <option value="cellumove">cellumove</option>
+            <option value="yuma">yuma</option>
+          </select>
+
+          {shopifyLoading && <span style={{ color: "#fff" }}>Loading…</span>}
+          {shopifyError && <span style={{ color: "#ffb3b3" }}>{shopifyError}</span>}
+        </div>
       </div>
 
       <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 10 }}>
@@ -580,23 +608,9 @@ function App() {
         />
 
         {orderSearchNum && (
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "1fr 1fr",
-              gap: 14,
-              alignItems: "start",
-            }}
-          >
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, alignItems: "start" }}>
             {/* Invoice */}
-            <div
-              style={{
-                background: "rgba(0,0,0,0.15)",
-                padding: 12,
-                borderRadius: 12,
-                margin: 20,
-              }}
-            >
+            <div style={{ background: "rgba(0,0,0,0.15)", padding: 12, borderRadius: 12, margin: 20 }}>
               <div style={{ color: "#fff", fontWeight: 700, marginBottom: 8 }}>Invoice</div>
               {invoiceDisplay ? (
                 <table className="table results-table">
@@ -606,7 +620,6 @@ function App() {
                       <th>Carrier</th>
                       <th>Tracking</th>
                       <th>Line Items</th>
-                      <th>Variant</th>
                       <th>Quantity</th>
                     </tr>
                   </thead>
@@ -619,11 +632,6 @@ function App() {
                       <td>
                         {invoiceDisplay.lineItems.map((t, i) => (
                           <div key={i}>{t}</div>
-                        ))}
-                      </td>
-                      <td>
-                        {invoiceDisplay.variants.map((t, i) => (
-                          <div key={i}>{t || "—"}</div>
                         ))}
                       </td>
                       <td>
@@ -642,14 +650,7 @@ function App() {
             </div>
 
             {/* Shopify */}
-            <div
-              style={{
-                background: "rgba(0,0,0,0.15)",
-                padding: 12,
-                borderRadius: 12,
-                margin: 20,
-              }}
-            >
+            <div style={{ background: "rgba(0,0,0,0.15)", padding: 12, borderRadius: 12, margin: 20 }}>
               <div style={{ color: "#fff", fontWeight: 700, marginBottom: 8 }}>Shopify</div>
 
               {shopifyOrder && shopifyDisplay ? (
@@ -660,7 +661,6 @@ function App() {
                       <th>Customer</th>
                       <th>Country</th>
                       <th>Line Items</th>
-                      <th>Variant</th>
                       <th>Quantity</th>
                     </tr>
                   </thead>
@@ -675,11 +675,6 @@ function App() {
                         ))}
                       </td>
                       <td>
-                        {shopifyDisplay.variants.map((t, i) => (
-                          <div key={i}>{t || "—"}</div>
-                        ))}
-                      </td>
-                      <td>
                         {shopifyDisplay.quantities.map((t, i) => (
                           <div key={i}>{t}</div>
                         ))}
@@ -688,9 +683,7 @@ function App() {
                   </tbody>
                 </table>
               ) : (
-                <div style={{ color: "#fff", opacity: 0.9 }}>
-                  Not found in Shopify (or still loading).
-                </div>
+                <div style={{ color: "#fff", opacity: 0.9 }}>Not found in Shopify (or still loading).</div>
               )}
             </div>
           </div>
@@ -700,7 +693,6 @@ function App() {
       <div className="side-by-side">
         <Table title="ORDER TRACKING & COSTS" onDataChange={setOrdersFile} />
         <Table title="PRICES" onDataChange={setPricesFile} />
-        {/* ✅ Pass filtered orders so removed items don't show in ShopifyTable */}
         <ShopifyTable title="SHOPIFY" data={filteredShopifyOrders} error={shopifyError} />
       </div>
 
