@@ -358,3 +358,80 @@ input[type='file']{
   scrollbar-width: none;
   
 }
+
+/* When loading, prevent page scroll */
+.no-scroll {
+  overflow: hidden !important;
+}
+
+/* FULL-SCREEN MODAL OVERLAY */
+.loading-overlay {
+  position: fixed;
+  inset: 0;                  /* top:0 right:0 bottom:0 left:0 */
+  width: 100vw;
+  height: 100vh;
+  z-index: 999999;           /* above everything */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  /* blocks interaction */
+  pointer-events: all;
+  cursor: wait;
+
+  /* look */
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+/* Optional: subtly dim/blur underlying app while loading */
+.App.is-loading {
+  /* Don't set pointer-events:none here (would block overlay since it's inside App) */
+}
+
+.loading-card {
+  min-width: 280px;
+  max-width: 420px;
+  padding: 22px 26px;
+  border-radius: 16px;
+  background: rgba(20, 20, 25, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  text-align: center;
+  color: #fff;
+
+  animation: popIn 220ms ease-out;
+}
+
+@keyframes popIn {
+  from { transform: translateY(6px) scale(0.98); opacity: 0; }
+  to   { transform: translateY(0) scale(1); opacity: 1; }
+}
+
+/* Animated spinner */
+.spinner {
+  width: 46px;
+  height: 46px;
+  margin: 0 auto 12px auto;
+  border-radius: 50%;
+  border: 4px solid rgba(255, 255, 255, 0.25);
+  border-top-color: rgba(255, 255, 255, 0.95);
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.loading-text {
+  font-family: "Zen Dots", sans-serif;
+  font-size: 14px;
+  letter-spacing: 0.4px;
+  margin-bottom: 4px;
+}
+
+.loading-subtext {
+  font-size: 12px;
+  opacity: 0.85;
+}

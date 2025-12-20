@@ -392,6 +392,17 @@ function App() {
   }, [ordersFile, orderSearchNum]);
 
   useEffect(() => {
+    // Prevent scroll + weird interactions while loading
+    if (shopifyLoading) {
+      document.body.classList.add("no-scroll");
+    } else {
+      document.body.classList.remove("no-scroll");
+    }
+
+    return () => document.body.classList.remove("no-scroll");
+  }, [shopifyLoading]);
+
+  useEffect(() => {
     const fetchOrders = async () => {
       setShopifyLoading(true);
       setShopifyError("");
@@ -544,18 +555,9 @@ function App() {
   };
 
   return (
-    <div className="App">
-      {shopifyLoading && (
-        <div className="loading-overlay" role="alert" aria-busy="true">
-          <div className="loading-card">
-            <div className="spinner" />
-            <div className="loading-text">Fetching Shopify orders…</div>
-            <div className="loading-subtext">Please wait</div>
-          </div>
-        </div>
-      )}
+    <div className={`App ${shopifyLoading ? "is-loading" : ""}`}>
 
-      <h1 style={{ color: "#fff" }}>INVOICE CHECKER</h1>
+      <h1 style={{ color: "#fff", margin: 20 }}>INVOICE CHECKER</h1>
 
       <div className="controls">
         <button className="button" onClick={handleRunCheck} disabled={shopifyLoading}>
@@ -749,6 +751,15 @@ function App() {
                 ))}
               </tbody>
             </table>
+          </div>
+        </div>
+      )}
+      {shopifyLoading && (
+        <div className="loading-overlay" role="alert" aria-busy="true" aria-live="polite">
+          <div className="loading-card">
+            <div className="spinner" />
+            <div className="loading-text">Fetching Shopify orders…</div>
+            <div className="loading-subtext">Please wait</div>
           </div>
         </div>
       )}
