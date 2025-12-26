@@ -1,0 +1,8 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron/refresh-tokens?secret=YOUR_REFRESH_SECRET",
+      "schedule": "0 * * * *"
+    }
+  ]
+}
