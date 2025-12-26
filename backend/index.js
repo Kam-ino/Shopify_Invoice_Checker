@@ -1,36 +1,34 @@
-require("dotenv").config();
-const fs = require("fs");
-const path = require("path");
+/**
+ * Vercel-ready Express API (single function) that:
+ * - Mints Shopify client-credentials access tokens
+ * - Stores them in Vercel KV with TTL
+ * - Auto-retries once on 401 by re-minting token
+ * - Provides a cron endpoint to refresh tokens hourly
+ *
+ * Required deps:
+ *   npm i express axios cors @vercel/kv
+ *
+ * Required env vars per store:
+ *   BLOOMOMMY_SHOPIFY_STORE_DOMAIN
+ *   BLOOMOMMY_SHOPIFY_CLIENT_ID
+ *   BLOOMOMMY_SHOPIFY_CLIENT_SECRET
+ *   (repeat for CELLUMOVE_, YUMA_)
+ *
+ * Optional:
+ *   SHOPIFY_API_VERSION=2025-10
+ *   REFRESH_SECRET=<some secret>  (protects cron endpoint)
+ */
+
 const express = require("express");
 const axios = require("axios");
 const cors = require("cors");
+const { kv } = require("@vercel/kv"); // Vercel KV (durable Redis)
 
 const app = express();
 app.use(cors());
+app.use(express.json({ limit: "1mb" }));
 
-const PORT = process.env.PORT || 4000;
 const API_VERSION = process.env.SHOPIFY_API_VERSION || "2025-10";
-
-/**
- * Runtime refresh settings
- * - ENABLE_TOKEN_REFRESH=true  -> refresh all store tokens on an interval
- * - TOKEN_REFRESH_MINUTES=60   -> default hourly
- * - ENV_FILE_PATH=/path/to/.env (optional)
- *
- * Note: Persisting to .env only works on writable, long-running servers. On serverless,
- * writing to disk may fail; this code logs and still uses in-memory cache.
- */
-const ENABLE_TOKEN_REFRESH = String(process.env.ENABLE_TOKEN_REFRESH || "").toLowerCase() === "true";
-const TOKEN_REFRESH_MINUTES = Number(process.env.TOKEN_REFRESH_MINUTES || 60);
-const ENV_FILE_PATH = process.env.ENV_FILE_PATH
-  ? path.resolve(process.env.ENV_FILE_PATH)
-  : path.resolve(process.cwd(), ".env");
-
-/**
- * Optional protection for manual refresh endpoint:
- * - REFRESH_SECRET=someLongSecret
- * Call POST /api/refresh-tokens with header x-refresh-secret: <secret>
- */
 const REFRESH_SECRET = String(process.env.REFRESH_SECRET || "").trim();
 
 const STORES = {
@@ -38,40 +36,27 @@ const STORES = {
     domainEnv: "BLOOMOMMY_SHOPIFY_STORE_DOMAIN",
     clientIdEnv: "BLOOMOMMY_SHOPIFY_CLIENT_ID",
     clientSecretEnv: "BLOOMOMMY_SHOPIFY_CLIENT_SECRET",
-    accessTokenEnv: "BLOOMOMMY_SHOPIFY_ACCESS_TOKEN",
   },
   cellumove: {
     domainEnv: "CELLUMOVE_SHOPIFY_STORE_DOMAIN",
     clientIdEnv: "CELLUMOVE_SHOPIFY_CLIENT_ID",
     clientSecretEnv: "CELLUMOVE_SHOPIFY_CLIENT_SECRET",
-    accessTokenEnv: "CELLUMOVE_SHOPIFY_ACCESS_TOKEN",
   },
   yuma: {
     domainEnv: "YUMA_SHOPIFY_STORE_DOMAIN",
     clientIdEnv: "YUMA_SHOPIFY_CLIENT_ID",
     clientSecretEnv: "YUMA_SHOPIFY_CLIENT_SECRET",
-    accessTokenEnv: "YUMA_SHOPIFY_ACCESS_TOKEN",
   },
 };
-
-// storeKey -> { token, expiresAtMs }
-const tokenCache = new Map();
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function envTrim(name) {
   return String(process.env[name] || "").trim();
 }
 function mustEnv(name) {
   const v = envTrim(name);
-  if (!v) throw new Error(`Missing ${name} in .env`);
+  if (!v) throw new Error(`Missing env var: ${name}`);
   return v;
 }
-function tokenSuffix(token) {
-  const t = String(token || "");
-  return t.length >= 6 ? t.slice(-6) : t;
-}
-
 function getStoreCfg(storeKeyRaw) {
   const storeKey = String(storeKeyRaw || "bloomommy").toLowerCase();
   const cfg = STORES[storeKey];
@@ -80,25 +65,23 @@ function getStoreCfg(storeKeyRaw) {
   }
 
   const domain = mustEnv(cfg.domainEnv);
-  const staticToken = envTrim(cfg.accessTokenEnv);
-  const clientId = envTrim(cfg.clientIdEnv);
-  const clientSecret = envTrim(cfg.clientSecretEnv);
+  const clientId = mustEnv(cfg.clientIdEnv);
+  const clientSecret = mustEnv(cfg.clientSecretEnv);
 
-  return { storeKey, domain, staticToken, clientId, clientSecret, accessTokenEnv: cfg.accessTokenEnv };
+  return { storeKey, domain, clientId, clientSecret };
 }
 
-/**
- * Shopify client-credentials grant (server-to-server)
- * Returns an "access_token" + "expires_in" (commonly ~86399s)
- */
-async function fetchClientCredentialsToken({ domain, clientId, clientSecret }) {
-  if (!clientId || !clientSecret) {
-    throw new Error(
-      `Missing client credentials for ${domain}. Set *_SHOPIFY_CLIENT_ID and *_SHOPIFY_CLIENT_SECRET in .env`
-    );
-  }
+function tokenKey(storeKey) {
+  return `shopify:access_token:${storeKey}`;
+}
+function tokenSuffix(token) {
+  const t = String(token || "");
+  return t.length >= 6 ? t.slice(-6) : t;
+}
 
+async function fetchClientCredentialsToken({ domain, clientId, clientSecret }) {
   const url = `https://${domain}/admin/oauth/access_token`;
+
   const body = new URLSearchParams();
   body.append("grant_type", "client_credentials");
   body.append("client_id", clientId);
@@ -110,123 +93,48 @@ async function fetchClientCredentialsToken({ domain, clientId, clientSecret }) {
   });
 
   const token = resp.data?.access_token;
-  const expiresIn = Number(resp.data?.expires_in ?? 0); // seconds
+  const expiresIn = Number(resp.data?.expires_in ?? 0) || 86399; // default ~1 day if missing
 
   if (!token) throw new Error(`No access_token returned for ${domain}`);
 
-  // Refresh early (60s)
-  const effectiveExpiresIn = (expiresIn || 86399) - 60;
-  const expiresAtMs = Date.now() + Math.max(1, effectiveExpiresIn) * 1000;
+  // Refresh early by 60 seconds
+  const expiresAtMs = Date.now() + Math.max(1, expiresIn - 60) * 1000;
 
-  return { token, expiresAtMs, expiresIn: expiresIn || 86399 };
+  return { token, expiresIn, expiresAtMs };
 }
 
-/**
- * .env persistence helpers
- */
-function upsertEnvVar(fileText, key, value) {
-  const line = `${key}=${value}`;
-  const re = new RegExp(`^${key}=.*$`, "m");
-  if (re.test(fileText)) return fileText.replace(re, line);
-  const trimmed = fileText.endsWith("\n") ? fileText : fileText + "\n";
-  return trimmed + line + "\n";
-}
+async function getTokenFromKV(storeKey) {
+  const raw = await kv.get(tokenKey(storeKey));
+  if (!raw) return null;
 
-function persistTokenToEnv(storeKey, token) {
-  const cfg = STORES[storeKey];
-  if (!cfg) throw new Error(`Unknown storeKey: ${storeKey}`);
-
-  const envKey = cfg.accessTokenEnv;
-
-  // Update runtime immediately
-  process.env[envKey] = token;
-
-  // Persist to disk (best-effort; may fail on serverless)
-  const current = fs.existsSync(ENV_FILE_PATH) ? fs.readFileSync(ENV_FILE_PATH, "utf8") : "";
-  const updated = upsertEnvVar(current, envKey, token);
-
-  // Simple atomic write
-  const tmp = `${ENV_FILE_PATH}.tmp`;
-  fs.writeFileSync(tmp, updated, "utf8");
-  fs.renameSync(tmp, ENV_FILE_PATH);
-}
-
-/**
- * Mint a fresh token for a store, cache it, and persist it into .env (best-effort).
- */
-async function mintAndPersistToken(storeKey) {
-  const cfg = getStoreCfg(storeKey);
-
-  const fresh = await fetchClientCredentialsToken(cfg);
-  tokenCache.set(storeKey, { token: fresh.token, expiresAtMs: fresh.expiresAtMs });
-
-  let persisted = false;
-  let persistError = null;
-
+  // raw can be string or object depending on KV client/runtime
   try {
-    persistTokenToEnv(storeKey, fresh.token);
-    persisted = true;
-  } catch (e) {
-    persisted = false;
-    persistError = e?.message || String(e);
+    return typeof raw === "string" ? JSON.parse(raw) : raw;
+  } catch {
+    return null;
   }
-
-  return {
-    storeKey,
-    domain: cfg.domain,
-    tokenSuffix: tokenSuffix(fresh.token),
-    expiresIn: fresh.expiresIn,
-    persisted,
-    persistError,
-  };
 }
 
-async function refreshAllTokensOnce() {
-  const keys = Object.keys(STORES);
-
-  const results = await Promise.allSettled(keys.map((k) => mintAndPersistToken(k)));
-
-  results.forEach((r, i) => {
-    const storeKey = keys[i];
-    if (r.status === "fulfilled") {
-      const out = r.value;
-      console.log(
-        `[token-refresh] store=${storeKey} domain=${out.domain} tokenSuffix=${out.tokenSuffix} persisted=${out.persisted} expiresIn=${out.expiresIn}s`
-      );
-      if (!out.persisted && out.persistError) {
-        console.warn(`[token-refresh] store=${storeKey} persist failed: ${out.persistError}`);
-      }
-    } else {
-      console.warn(`[token-refresh] store=${storeKey} FAILED: ${r.reason?.message || r.reason}`);
-    }
-  });
+async function setTokenInKV(storeKey, tokenObj) {
+  // KV TTL: set a little shorter than actual expiry
+  const ttlSec = Math.max(60, Math.floor((tokenObj.expiresAtMs - Date.now()) / 1000));
+  await kv.set(tokenKey(storeKey), JSON.stringify(tokenObj), { ex: ttlSec }); // ex = seconds :contentReference[oaicite:2]{index=2}
 }
 
-/**
- * Token retrieval:
- * 1) Use valid cached oauth token if present
- * 2) Otherwise use env token if present
- * 3) Otherwise mint a new oauth token (and persist best-effort)
- *
- * If forceRefresh=true, skip cache and env and mint new.
- */
 async function getAccessTokenForStore(storeKey, { forceRefresh = false } = {}) {
   const cfg = getStoreCfg(storeKey);
 
   if (!forceRefresh) {
-    const cached = tokenCache.get(cfg.storeKey);
+    const cached = await getTokenFromKV(cfg.storeKey);
     if (cached?.token && cached.expiresAtMs > Date.now()) {
-      return { store: cfg.storeKey, domain: cfg.domain, token: cached.token, source: "cache" };
-    }
-
-    if (cfg.staticToken) {
-      return { store: cfg.storeKey, domain: cfg.domain, token: cfg.staticToken, source: "env" };
+      return { store: cfg.storeKey, domain: cfg.domain, token: cached.token, source: "kv" };
     }
   }
 
-  // Mint fresh + persist
-  const out = await mintAndPersistToken(cfg.storeKey);
-  return { store: cfg.storeKey, domain: cfg.domain, token: process.env[cfg.accessTokenEnv], source: "oauth" };
+  const fresh = await fetchClientCredentialsToken(cfg);
+  await setTokenInKV(cfg.storeKey, { token: fresh.token, expiresAtMs: fresh.expiresAtMs });
+
+  return { store: cfg.storeKey, domain: cfg.domain, token: fresh.token, source: "oauth" };
 }
 
 async function shopifyGraphql({ domain, token, query, variables }) {
@@ -245,7 +153,6 @@ async function shopifyGraphql({ domain, token, query, variables }) {
       }
     );
 
-    // GraphQL errors come back as 200 with errors[]
     if (resp.data?.errors?.length) {
       const e = new Error("Shopify GraphQL returned errors");
       e.shopifyStatus = 200;
@@ -265,12 +172,6 @@ async function shopifyGraphql({ domain, token, query, variables }) {
   }
 }
 
-/**
- * Fetch ALL orders using cursor pagination.
- * Options:
- * - limit: stop after N orders (for quick tests)
- * - maxPages: stop after N pages (each page up to 250)
- */
 async function fetchAllOrders({ domain, token, limit = 0, maxPages = 0 }) {
   const query = `
     query OrdersPage($first: Int!, $after: String) {
@@ -326,103 +227,67 @@ async function fetchAllOrders({ domain, token, limit = 0, maxPages = 0 }) {
     const hasNext = !!conn?.pageInfo?.hasNextPage;
     const endCursor = conn?.pageInfo?.endCursor || null;
 
-    // Stop conditions
     if (limit > 0 && all.length >= limit) return all.slice(0, limit);
     if (maxPages > 0 && page >= maxPages) return all;
     if (!hasNext) return all;
 
     after = endCursor;
 
-    // Small delay to reduce throttle risk
-    await sleep(200);
+    // small throttle cushion
+    await new Promise((r) => setTimeout(r, 200));
   }
 }
 
 /**
- * Health snapshot (helps debug which token source is used)
+ * Routes
  */
-app.get("/api/health", (req, res) => {
-  const keys = Object.keys(STORES);
-  const snapshot = keys.map((k) => {
-    const cfg = getStoreCfg(k);
-    const cached = tokenCache.get(k);
-    return {
-      store: k,
-      domain: cfg.domain,
-      envHasToken: Boolean(cfg.staticToken),
-      cacheHasToken: Boolean(cached?.token),
-      cacheTtlSec: cached?.expiresAtMs ? Math.max(0, Math.floor((cached.expiresAtMs - Date.now()) / 1000)) : null,
-      envFilePath: ENV_FILE_PATH,
-      refreshEnabled: ENABLE_TOKEN_REFRESH,
-      refreshMinutes: TOKEN_REFRESH_MINUTES,
-    };
-  });
-  res.json({ ok: true, snapshot });
-});
 
-/**
- * Manual token refresh endpoint (useful if you trigger via cron)
- */
-app.post("/api/refresh-tokens", async (req, res) => {
-  if (REFRESH_SECRET) {
-    const provided = String(req.headers["x-refresh-secret"] || "").trim();
-    if (provided !== REFRESH_SECRET) {
-      return res.status(401).json({ ok: false, error: "Unauthorized" });
-    }
-  }
-
+app.get("/api/health", async (req, res) => {
   try {
-    await refreshAllTokensOnce();
-    return res.json({ ok: true });
+    const stores = Object.keys(STORES);
+    const snapshot = await Promise.all(
+      stores.map(async (k) => {
+        const cfg = getStoreCfg(k);
+        const cached = await getTokenFromKV(k);
+        return {
+          store: k,
+          domain: cfg.domain,
+          cacheHasToken: Boolean(cached?.token),
+          cacheTtlSec: cached?.expiresAtMs ? Math.max(0, Math.floor((cached.expiresAtMs - Date.now()) / 1000)) : null,
+        };
+      })
+    );
+    res.json({ ok: true, apiVersion: API_VERSION, snapshot });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: e?.message || String(e) });
+    res.status(500).json({ ok: false, error: e?.message || String(e) });
   }
 });
 
 /**
- * GET /api/orders?store=bloomommy|cellumove|yuma
- * Optional:
- *   &limit=500        -> only first 500 orders (debug)
- *   &maxPages=3       -> only first 3 pages (debug)
+ * Orders endpoint:
+ * GET /api/orders?store=bloomommy
+ * Optional: &limit=200 &maxPages=2
  */
 app.get("/api/orders", async (req, res) => {
   const store = String(req.query.store || "bloomommy").toLowerCase();
   const limit = Number(req.query.limit || 0) || 0;
   const maxPages = Number(req.query.maxPages || 0) || 0;
 
+  let auth;
   try {
-    // get token
-    let auth = await getAccessTokenForStore(store);
+    auth = await getAccessTokenForStore(store);
 
     console.log(
       `[orders] store=${store} domain=${auth.domain} source=${auth.source} tokenSuffix=${tokenSuffix(auth.token)}`
     );
 
-    // fetch all orders (retry once on 401 by minting a new token and persisting)
     try {
-      const orders = await fetchAllOrders({
-        domain: auth.domain,
-        token: auth.token,
-        limit,
-        maxPages,
-      });
-
-      const pages = Math.max(1, Math.ceil(orders.length / 250));
-
-      return res.json({ store, count: orders.length, pages, orders });
+      const orders = await fetchAllOrders({ domain: auth.domain, token: auth.token, limit, maxPages });
+      return res.json({ store, count: orders.length, pages: Math.max(1, Math.ceil(orders.length / 250)), orders });
     } catch (err) {
-      const status = err.shopifyStatus;
-
-      if (status === 401) {
-        console.warn(`[orders] 401 for ${store}. Minting fresh token and retrying once...`);
-        tokenCache.delete(store);
-
-        try {
-          await mintAndPersistToken(store);
-        } catch (e) {
-          console.warn(`[orders] token mint failed for ${store}: ${e?.message || e}`);
-        }
-
+      // If token is invalid, refresh and retry once
+      if (err.shopifyStatus === 401) {
+        console.warn(`[orders] 401 store=${store}. Refreshing token and retrying once...`);
         auth = await getAccessTokenForStore(store, { forceRefresh: true });
 
         console.log(
@@ -431,16 +296,8 @@ app.get("/api/orders", async (req, res) => {
           )}`
         );
 
-        const orders = await fetchAllOrders({
-          domain: auth.domain,
-          token: auth.token,
-          limit,
-          maxPages,
-        });
-
-        const pages = Math.max(1, Math.ceil(orders.length / 250));
-
-        return res.json({ store, count: orders.length, pages, orders });
+        const orders = await fetchAllOrders({ domain: auth.domain, token: auth.token, limit, maxPages });
+        return res.json({ store, count: orders.length, pages: Math.max(1, Math.ceil(orders.length / 250)), orders });
       }
 
       console.error("=== /api/orders ERROR ===");
@@ -458,39 +315,43 @@ app.get("/api/orders", async (req, res) => {
         error: err.shopifyData || err.message,
       });
     }
-  } catch (err) {
-    console.error("=== /api/orders TOP-LEVEL ERROR ===");
-    console.error("store:", store);
-    console.error("status:", err.shopifyStatus);
-    console.error("data:", JSON.stringify(err.shopifyData, null, 2));
-    console.error("message:", err.message);
-
+  } catch (e) {
     return res.status(500).json({
       store,
-      status: err.shopifyStatus || null,
-      error: err.shopifyData || err.message || "Failed to fetch orders",
+      status: e?.shopifyStatus || null,
+      error: e?.shopifyData || e?.message || String(e),
     });
   }
 });
 
-app.listen(PORT, async () => {
-  console.log(`Server running: http://localhost:${PORT}/api/orders`);
-  console.log(`Health: http://localhost:${PORT}/api/health`);
-  console.log(`API_VERSION=${API_VERSION}`);
-  console.log(`ENV_FILE_PATH=${ENV_FILE_PATH}`);
+/**
+ * Cron endpoint (GET) to refresh all store tokens:
+ * GET /api/cron/refresh-tokens?secret=...
+ *
+ * Use with Vercel Cron Jobs (vercel.json "crons").
+ */
+app.get("/api/cron/refresh-tokens", async (req, res) => {
+  if (REFRESH_SECRET) {
+    const provided = String(req.query.secret || "");
+    if (provided !== REFRESH_SECRET) return res.status(401).json({ ok: false, error: "Unauthorized" });
+  }
 
-  if (ENABLE_TOKEN_REFRESH) {
-    console.log(`[token-refresh] enabled every ${TOKEN_REFRESH_MINUTES} minutes`);
-
-    // Run once immediately at boot
-    try {
-      await refreshAllTokensOnce();
-    } catch (e) {
-      console.warn("[token-refresh] startup refresh failed:", e?.message || e);
-    }
-
-    setInterval(() => {
-      refreshAllTokensOnce().catch((e) => console.warn("[token-refresh] interval refresh failed:", e?.message || e));
-    }, TOKEN_REFRESH_MINUTES * 60 * 1000);
+  try {
+    const keys = Object.keys(STORES);
+    const results = await Promise.all(
+      keys.map(async (k) => {
+        const auth = await getAccessTokenForStore(k, { forceRefresh: true });
+        return { store: k, domain: auth.domain, tokenSuffix: tokenSuffix(auth.token) };
+      })
+    );
+    return res.json({ ok: true, refreshed: results });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e?.message || String(e) });
   }
 });
+
+/**
+ * Vercel requires exporting the Express app (no app.listen).
+ * A CommonJS export works as the module's default export. :contentReference[oaicite:3]{index=3}
+ */
+module.exports = app;
