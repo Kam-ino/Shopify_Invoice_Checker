@@ -1,30 +1,59 @@
+/* =========================
+   App.css (Responsive Updated)
+   ========================= */
+
+/* Global reset (kept, but moved to the top for predictability) */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+:root {
+  --page-pad: 16px;
+  --card-pad: 16px;
+  --radius: 20px;
+}
+
 .App {
   text-align: center;
   background-color: #282c34;
   min-height: 100vh;
   height: fit-content;
   padding: 1px;
-  overflow: hidden;
+
+  /* Allow vertical scroll on small devices while preventing horizontal overflow */
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .side-by-side {
   display: flex;
-  gap: 10px;
+  gap: 12px;
   align-items: flex-start;
   flex-wrap: wrap;
-  margin-top: 20px;
+  margin-top: 16px;
+  padding: 0 var(--page-pad);
 }
 
+/* Consolidated .wrapper (previously defined twice) */
 .wrapper {
-  flex: 1 1 0;
+  flex: 1 1 420px;
+  min-width: 0;
+
   background: #7de0ff;
-  padding: 16px;
+  padding: var(--card-pad);
   border-radius: 18px;
+
+  /* consistent spacing */
+  margin: 12px 0;
+  max-height: fit-content;
 }
 
 .table-wrapper {
   max-width: 100%;
   overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .table {
@@ -44,6 +73,10 @@
   display: flex;
   align-items: center;
   gap: 12px;
+
+  /* responsive: allow wrapping instead of overflow */
+  flex-wrap: wrap;
+  justify-content: center;
 }
 
 .status-message {
@@ -53,9 +86,9 @@
 }
 
 .results-wrapper {
-  margin: 20px;
-  background-color:#7de0ff;
-  padding: 20px;
+  margin: clamp(10px, 2vw, 20px);
+  background-color: #7de0ff;
+  padding: clamp(14px, 2vw, 20px);
   border-radius: 20px;
 }
 
@@ -79,7 +112,9 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
   margin-bottom: 8px;
+  flex-wrap: wrap;
 }
 
 .button.secondary {
@@ -114,7 +149,8 @@
   gap: 10px;
   margin-top: 10px;
 }
-/* ===== DROPDOWN SELECT STYLES (unchanged) ===== */
+
+/* ===== DROPDOWN SELECT STYLES (kept; only width gets responsive via .select) ===== */
 .brand-select-form {
   /* keep it inline with your controls row */
   display: inline-block;
@@ -122,7 +158,7 @@
 
 /* Container for the custom select */
 .select {
-  width: 225px;
+  width: min(225px, 90vw);
   height: 50px;
   cursor: pointer;
   background-color: #ffffff;
@@ -278,30 +314,15 @@
   margin-top: -40px;
 }
 
-*{
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
-}
-
-.wrapper{
-  width: 45vw;
-  max-height: fit-content;
-  margin: 20px;
-  padding: 20px;
-  background-color: #61dafb;
-  border-radius: 20px;
-}
-
-input[type='file']{
+input[type="file"] {
   display: none;
 }
 
-
-.custom-form{
+.custom-form {
   width: 100%;
 }
 
+/* Main button (responsive sizing; replaces vw width) */
 .button {
   appearance: none;
   background-color: #3a79c0;
@@ -325,8 +346,11 @@ input[type='file']{
   user-select: none;
   -webkit-user-select: none;
   touch-action: manipulation;
-  width: 12vw;
+
+  width: auto;
+  min-width: clamp(140px, 35vw, 240px);
   max-width: 400px;
+
   will-change: transform;
 }
 
@@ -346,7 +370,7 @@ input[type='file']{
   transform: translateY(0);
 }
 
-.viewer{
+.viewer {
   width: 100%;
   max-height: 250px;
   background-color: #acacac;
@@ -354,9 +378,9 @@ input[type='file']{
   display: flex;
   justify-content: start;
   align-items: start;
-  overflow: scroll;
+  overflow: auto;
   scrollbar-width: none;
-  
+  -webkit-overflow-scrolling: touch;
 }
 
 /* When loading, prevent page scroll */
@@ -387,12 +411,12 @@ input[type='file']{
 
 /* Optional: subtly dim/blur underlying app while loading */
 .App.is-loading {
-  /* Don't set pointer-events:none here (would block overlay since it's inside App) */
+  /* Intentionally empty: overlay blocks interaction */
 }
 
 .loading-card {
   min-width: 280px;
-  max-width: 420px;
+  max-width: min(420px, 92vw);
   padding: 22px 26px;
   border-radius: 16px;
   background: rgba(20, 20, 25, 0.9);
@@ -434,4 +458,67 @@ input[type='file']{
 .loading-subtext {
   font-size: 12px;
   opacity: 0.85;
+}
+
+/* =========================
+   Breakpoints
+   ========================= */
+
+/* Mobile: stack layout and tighten spacing */
+@media (max-width: 600px) {
+  :root {
+    --page-pad: 12px;
+    --card-pad: 14px;
+    --radius: 18px;
+  }
+
+  .side-by-side {
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .wrapper {
+    flex: 1 1 auto;
+  }
+
+  .button {
+    margin: 12px;
+    min-width: clamp(160px, 80vw, 320px);
+    min-height: 52px;
+    padding: 14px 18px;
+  }
+
+  .button.secondary {
+    font-size: 14px;
+    padding: 8px 14px;
+  }
+
+  .viewer {
+    max-height: 220px;
+    padding: 12px;
+  }
+
+  .status-message {
+    font-size: 0.85rem;
+  }
+}
+
+/* Desktop: prefer two columns when space is available */
+@media (min-width: 900px) {
+  .side-by-side {
+    flex-wrap: nowrap;
+  }
+}
+
+/* Accessibility */
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation: none;
+  }
+  .loading-card {
+    animation: none;
+  }
+  .button {
+    transition: none;
+  }
 }
