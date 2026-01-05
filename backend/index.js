@@ -589,3 +589,5 @@ app.listen(PORT, async () => {
     console.log("[sync] started on boot (incremental, full if empty)");
   }
 });
+
+module.exports = app; 
