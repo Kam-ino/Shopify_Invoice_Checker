@@ -569,7 +569,7 @@ app.post("/api/sync-all", async (req, res) => {
  * Boot
  * ----------------------------*/
 app.listen(PORT, async () => {
-  console.log(`Server running: http://localhost:${PORT}`);
+  console.log(`Server running: http://localhost:${PORT}/api/orders`);
   console.log(`API_VERSION=${API_VERSION}`);
   console.log(`MongoDB db=${MONGODB_DB}`);
   console.log(`Shops=${SHOP_KEYS.join(", ")}`);

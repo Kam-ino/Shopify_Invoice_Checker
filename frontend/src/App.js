@@ -408,7 +408,7 @@ function App() {
       setShopifyError("");
 
       try {
-        const response = await axios.get("http://localhost:4000/api/orders", {
+        const response = await axios.get("http://localhost:4000/api/orders" || "https://shopify-invoice-checker-backend.onrender.com/api/orders", {
           params: { store: selectedStore },
         });
 
