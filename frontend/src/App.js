@@ -5,6 +5,24 @@ import Table from "./components/table";
 import * as XLSX from "xlsx-js-style";
 import ShopifyTable from "./components/ShopifyTable";
 
+// Backend base URL
+// - In production: set REACT_APP_API_BASE (e.g. https://your-backend-domain.com)
+// - Local dev: http://localhost:4000
+const API_BASE =
+  (process.env.REACT_APP_API_BASE || "").trim() ||
+  "https://shopify-invoice-checker-backend.onrender.com";
+
+// In Shopify Admin iframe context, the app URL includes `?shop=<shop>.myshopify.com`.
+// We use this to automatically choose the correct store.
+const getShopFromUrl = () => {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    return String(params.get("shop") || "").trim();
+  } catch {
+    return "";
+  }
+};
+
 // Helper to parse totals from Oct prices (strip currency etc)
 /* ---------------- Existing helpers ---------------- */
 
@@ -18,7 +36,7 @@ function parsePrice(val) {
   const num = Number(s);
   return isNaN(num) ? NaN : num;
 }
-
+ 
 const COUNTRY_COLUMNS = {
   FR: { total: "Total to FR", upsell: "Upsell to FR" },
   BE: { total: "Total to BE", upsell: "Upsell to BE" },
@@ -69,7 +87,7 @@ function computeOrderResult(orderRows, priceIndex) {
     orderRows.find((r) => r["Country"] && String(r["Country"]).trim() !== "") || null;
   const country = countryRow ? String(countryRow["Country"]).trim() : null;
   const countryCols = COUNTRY_COLUMNS[country] || null;
-
+ 
   const groups = {};
   orderRows.forEach((row) => {
     const skuBase = row["SKU.1"] || row["SKU"];
@@ -286,7 +304,9 @@ function App() {
   const [resultsSortDir, setResultsSortDir] = useState("asc");
 
   // Shopify
-  const [selectedStore, setSelectedStore] = useState("bloomommy"); // default
+  const [stores, setStores] = useState([]); // [{ key, domain }]
+  const [installedShop, setInstalledShop] = useState(getShopFromUrl());
+  const [selectedStore, setSelectedStore] = useState("bloomommy"); // default; will auto-select by ?shop
   const [shopifyLoading, setShopifyLoading] = useState(false);
   const [shopifyError, setShopifyError] = useState("");
   const [orders, setOrders] = useState([]);
@@ -299,6 +319,35 @@ function App() {
   };
 
   const orderSearchNum = useMemo(() => getDigits(orderSearch), [orderSearch]);
+
+  const normalizeShopDomain = (v) =>
+    String(v || "")
+      .trim()
+      .toLowerCase()
+      .replace(/^https?:\/\//, "")
+      .replace(/\/.*/, "");
+
+  // Load store list from backend, then auto-select the store matching the Shopify `?shop=` parameter.
+  useEffect(() => {
+    const loadStores = async () => {
+      try {
+        const resp = await axios.get(`${API_BASE}/api/stores`);
+        const list = Array.isArray(resp.data?.stores) ? resp.data.stores : [];
+        setStores(list);
+
+        const shop = normalizeShopDomain(installedShop);
+        if (shop) {
+          const match = list.find((s) => normalizeShopDomain(s?.domain) === shop);
+          if (match?.key) setSelectedStore(String(match.key));
+        }
+      } catch (e) {
+        // Non-fatal: the app can still run with the selectedStore default.
+        console.error("Failed to load store list:", e);
+      }
+    };
+
+    loadStores();
+  }, [installedShop]);
 
   // ✅ Filter Shopify orders once so ALL UI uses clean data (no removed items, no E-book)
   const filteredShopifyOrders = useMemo(() => {
@@ -408,8 +457,12 @@ function App() {
       setShopifyError("");
 
       try {
-        const response = await axios.get( "https://shopify-invoice-checker-backend.onrender.com/api/orders", { //"http://localhost:4000/api/orders" for local testing
-          params: { store: selectedStore },
+        const response = await axios.get(`${API_BASE}/api/orders`, {
+          // Pass `shop` when embedded in Shopify Admin so backend can resolve to the installed store.
+          params: {
+            store: selectedStore,
+            shop: installedShop || undefined,
+          },
         });
 
         const apiOrders = response.data?.orders;
@@ -424,7 +477,7 @@ function App() {
     };
 
     fetchOrders();
-  }, [selectedStore]);
+  }, [selectedStore, installedShop]);
 
   const handleRunCheck = () => {
     if (!ordersFile || !ordersFile.rows || !pricesFile || !pricesFile.rows) {
@@ -554,6 +607,12 @@ function App() {
     XLSX.writeFile(wb, "Orders_tracking_corrected.xlsx");
   };
 
+  const lockedToInstalledShop = useMemo(() => {
+    const shop = normalizeShopDomain(installedShop);
+    if (!shop) return false;
+    return (stores || []).some((s) => normalizeShopDomain(s?.domain) === shop);
+  }, [stores, installedShop]);
+
   return (
     <div className={`App ${shopifyLoading ? "is-loading" : ""}`}>
 
@@ -574,7 +633,7 @@ function App() {
           <select
             value={selectedStore}
             onChange={(e) => setSelectedStore(e.target.value)}
-            disabled={shopifyLoading}
+            disabled={shopifyLoading || lockedToInstalledShop}
             style={{
               padding: "8px 10px",
               borderRadius: 10,
@@ -582,10 +641,18 @@ function App() {
               outline: "none",
             }}
           >
-            <option value="bloomommy">bloomommy</option>
-            <option value="cellumove">cellumove</option>
-            <option value="yuma">yuma</option>
+            {(stores?.length ? stores : [{ key: "bloomommy", domain: "" }]).map((s) => (
+              <option key={s.key} value={s.key}>
+                {s.key}
+              </option>
+            ))}
           </select>
+
+          {lockedToInstalledShop && installedShop ? (
+            <span style={{ color: "rgba(255,255,255,0.85)", fontSize: 12 }}>
+              Installed store: {installedShop}
+            </span>
+          ) : null}
 
           {shopifyLoading && <span style={{ color: "#fff" }}>Loading…</span>}
           {shopifyError && <span style={{ color: "#ffb3b3" }}>{shopifyError}</span>}

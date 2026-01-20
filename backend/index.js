@@ -20,10 +20,37 @@ const TOKENS_COL = String(process.env.MONGODB_TOKENS_COLLECTION || "shopify_toke
 const META_COL = String(process.env.MONGODB_SYNC_META_COLLECTION || "shopify_sync_meta").trim();
 const ORDERS_PREFIX = String(process.env.MONGODB_ORDERS_PREFIX || "shopify_orders_").trim();
 
-const SHOP_KEYS = String(process.env.SHOP_KEYS || "bloomommy,cellumove")
-  .split(",")
-  .map((s) => s.trim().toLowerCase())
-  .filter(Boolean);
+/**
+ * Stores
+ *
+ * Preferred:
+ *  - Omit SHOP_KEYS and we auto-discover any env var like:
+ *      <STOREKEY>_SHOPIFY_STORE_DOMAIN
+ *
+ * Optional:
+ *  - Set SHOP_KEYS=bloomommy,cellumove,cellumove_cz,... to strictly control available stores
+ */
+function discoverStoreKeysFromEnv() {
+  const suffix = "_SHOPIFY_STORE_DOMAIN";
+  const keys = Object.keys(process.env)
+    .filter((k) => k.endsWith(suffix))
+    .map((k) => k.slice(0, -suffix.length).toLowerCase())
+    .filter(Boolean);
+  return [...new Set(keys)].sort();
+}
+
+const SHOP_KEYS = (() => {
+  const explicit = String(process.env.SHOP_KEYS || "")
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  if (explicit.length) return explicit;
+
+  const discovered = discoverStoreKeysFromEnv();
+  if (discovered.length) return discovered;
+
+  return ["bloomommy", "cellumove"];
+})();
 
 const SYNC_ON_START = String(process.env.SYNC_ON_START || "true").toLowerCase() === "true";
 const FULL_SYNC_IF_EMPTY = String(process.env.FULL_SYNC_IF_EMPTY || "true").toLowerCase() === "true";
@@ -47,11 +74,60 @@ function getStoreCfg(storeKeyRaw) {
   const storeKey = String(storeKeyRaw).toLowerCase();
   const prefix = storeKey.toUpperCase();
 
+  // Support family fallback: e.g. CELLUMOVE_CZ falls back to CELLUMOVE
+  const family = storeKey.includes("_") ? storeKey.split("_")[0].toUpperCase() : null;
+
   const domain = mustEnv(`${prefix}_SHOPIFY_STORE_DOMAIN`);
-  const clientId = mustEnv(`${prefix}_SHOPIFY_CLIENT_ID`);
-  const clientSecret = mustEnv(`${prefix}_SHOPIFY_CLIENT_SECRET`);
+
+  const clientId =
+    String(process.env[`${prefix}_SHOPIFY_CLIENT_ID`] || "").trim() ||
+    (family ? String(process.env[`${family}_SHOPIFY_CLIENT_ID`] || "").trim() : "") ||
+    String(process.env.SHOPIFY_CLIENT_ID || "").trim();
+
+  const clientSecret =
+    String(process.env[`${prefix}_SHOPIFY_CLIENT_SECRET`] || "").trim() ||
+    (family ? String(process.env[`${family}_SHOPIFY_CLIENT_SECRET`] || "").trim() : "") ||
+    String(process.env.SHOPIFY_CLIENT_SECRET || "").trim();
+
+  if (!clientId) {
+    throw new Error(
+      `Missing Shopify client id for store '${storeKey}' (expected ${prefix}_SHOPIFY_CLIENT_ID or ${family || "<FAMILY>"}_SHOPIFY_CLIENT_ID or SHOPIFY_CLIENT_ID)`
+    );
+  }
+  if (!clientSecret) {
+    throw new Error(
+      `Missing Shopify client secret for store '${storeKey}' (expected ${prefix}_SHOPIFY_CLIENT_SECRET or ${family || "<FAMILY>"}_SHOPIFY_CLIENT_SECRET or SHOPIFY_CLIENT_SECRET)`
+    );
+  }
 
   return { storeKey, domain, clientId, clientSecret };
+}
+
+/**
+ * When the app is embedded in a Shopify admin, Shopify includes `?shop=<shop>.myshopify.com`
+ * in the iframe URL. We can use that to automatically choose the correct store.
+ */
+function normalizeShopDomain(v) {
+  return String(v || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/\/.*/, "");
+}
+
+function storeKeyFromShopDomain(shopDomainRaw) {
+  const shopDomain = normalizeShopDomain(shopDomainRaw);
+  if (!shopDomain) return null;
+
+  for (const k of SHOP_KEYS) {
+    try {
+      const cfg = getStoreCfg(k);
+      if (normalizeShopDomain(cfg.domain) === shopDomain) return k;
+    } catch {
+      // ignore misconfigured stores
+    }
+  }
+  return null;
 }
 
 function ordersCollectionName(storeKey) {
@@ -467,13 +543,42 @@ async function syncAll({ full = false } = {}) {
 /** -----------------------------
  * 3) Serve from MongoDB (fast)
  * ----------------------------*/
+// List configured stores (used by the frontend to build the dropdown and to auto-select by ?shop=...)
+app.get("/api/stores", (req, res) => {
+  try {
+    const stores = SHOP_KEYS.map((k) => {
+      const cfg = getStoreCfg(k);
+      return { key: k, domain: cfg.domain };
+    });
+    res.json({ ok: true, stores });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err?.message || String(err) });
+  }
+});
+
 app.get("/api/orders", async (req, res) => {
-  const store = String(req.query.store || SHOP_KEYS[0] || "bloomommy").toLowerCase();
+  // In Shopify Admin iframe context, the URL includes ?shop=<shop>.myshopify.com.
+  // Prefer that shop domain so the app automatically reads from the store it is installed in.
+  const shopDomain =
+    normalizeShopDomain(req.query.shop || "") ||
+    normalizeShopDomain(req.headers["x-shopify-shop-domain"] || "");
+
+  let store = String(req.query.store || "").toLowerCase();
+  if (!store && shopDomain) {
+    store = storeKeyFromShopDomain(shopDomain) || "";
+  }
+  if (!store) store = String(SHOP_KEYS[0] || "bloomommy").toLowerCase();
+
   const limit = Math.max(0, Math.min(Number(req.query.limit || 200) || 200, 5000));
 
   try {
     if (!SHOP_KEYS.includes(store)) {
-      return res.status(400).json({ ok: false, error: `Unknown store. Allowed: ${SHOP_KEYS.join(", ")}` });
+      const hint = shopDomain
+        ? ` (shop=${shopDomain}, resolvedStore=${storeKeyFromShopDomain(shopDomain) || "<none>"})`
+        : "";
+      return res
+        .status(400)
+        .json({ ok: false, error: `Unknown store. Allowed: ${SHOP_KEYS.join(", ")}${hint}` });
     }
 
     if (SYNC_ON_READ) {
@@ -486,6 +591,7 @@ app.get("/api/orders", async (req, res) => {
     res.json({
       ok: true,
       store,
+      shop: shopDomain || null,
       source: "mongodb",
       collection: ordersCollectionName(store),
       count: orders.length,
