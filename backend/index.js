@@ -18,6 +18,7 @@ const MONGODB_URI = String(process.env.MONGODB_URI || "").trim();
 const MONGODB_DB = String(process.env.MONGODB_DB || "invoiceapp").trim();
 const TOKENS_COL = String(process.env.MONGODB_TOKENS_COLLECTION || "shopify_tokens").trim();
 const META_COL = String(process.env.MONGODB_SYNC_META_COLLECTION || "shopify_sync_meta").trim();
+const STORES_COL = String(process.env.MONGODB_STORES_COLLECTION || "shopify_stores").trim();
 const ORDERS_PREFIX = String(process.env.MONGODB_ORDERS_PREFIX || "shopify_orders_").trim();
 
 const SHOP_KEYS = String(process.env.SHOP_KEYS || "bloomommy,cellumove,yuma")
@@ -37,12 +38,6 @@ const SYNC_SECRET = String(process.env.SYNC_SECRET || "").trim();
  * ----------------------------*/
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function mustEnv(name) {
-  const v = String(process.env[name] || "").trim();
-  if (!v) throw new Error(`Missing env var: ${name}`);
-  return v;
-}
-
 function normalizeShopDomain(shop) {
   return String(shop || "")
     .trim()
@@ -59,14 +54,13 @@ function safeMongoSuffix(s) {
 }
 
 function ordersCollectionName(storeKey) {
-  // Keep your old naming but sanitize storeKey
   return `${ORDERS_PREFIX}${safeMongoSuffix(storeKey)}`;
 }
 
 /**
  * Discovers ALL stores from env based on SHOP_KEYS groups.
  *
- * For group KEY (e.g. CELLUMOVE), it will include:
+ * For each group KEY (e.g. CELLUMOVE) it will include:
  * - KEY_SHOPIFY_STORE_DOMAIN
  * - any KEY_*_SHOPIFY_STORE_DOMAIN (CELLUMOVE_ES_..., CELLUMOVE_MX_..., etc)
  *
@@ -116,7 +110,6 @@ function buildStoreRegistryFromEnv() {
     throw new Error("No *_SHOPIFY_STORE_DOMAIN vars discovered for SHOP_KEYS groups.");
   }
 
-  // Stable order for logs/health
   stores.sort((a, b) => a.storeKey.localeCompare(b.storeKey));
   return { stores, byShop, byStoreKey };
 }
@@ -124,19 +117,19 @@ function buildStoreRegistryFromEnv() {
 const STORE_REGISTRY = buildStoreRegistryFromEnv();
 
 function resolveStoreFromRequest(req) {
-  // Preferred: Shopify calls commonly include `shop`
+  // Preferred: ?shop=xxx.myshopify.com
   const shopQ = normalizeShopDomain(req.query.shop);
   if (shopQ && STORE_REGISTRY.byShop.has(shopQ)) return STORE_REGISTRY.byShop.get(shopQ);
 
-  // Sometimes available as header (webhooks/app proxy setups vary)
+  // Sometimes present as header in certain setups
   const shopH = normalizeShopDomain(req.headers["x-shopify-shop-domain"]);
   if (shopH && STORE_REGISTRY.byShop.has(shopH)) return STORE_REGISTRY.byShop.get(shopH);
 
-  // Fallback: your legacy param ?store=bloomommy OR ?store=cellumove_es
+  // Fallback: ?store=cellumove_es
   const storeQ = String(req.query.store || "").trim().toLowerCase();
   if (storeQ && STORE_REGISTRY.byStoreKey.has(storeQ)) return STORE_REGISTRY.byStoreKey.get(storeQ);
 
-  // Default to first configured store
+  // Default
   return STORE_REGISTRY.stores[0] || null;
 }
 
@@ -182,6 +175,11 @@ async function getMetaCol() {
   return db.collection(META_COL);
 }
 
+async function getStoresCol() {
+  const db = await getDb();
+  return db.collection(STORES_COL);
+}
+
 async function getOrdersCol(storeKey) {
   const db = await getDb();
   return db.collection(ordersCollectionName(storeKey));
@@ -190,28 +188,61 @@ async function getOrdersCol(storeKey) {
 async function ensureIndexesForStore(store) {
   const tokens = await getTokensCol();
   const meta = await getMetaCol();
+  const stores = await getStoresCol();
   const orders = await getOrdersCol(store.storeKey);
 
-  // Token docs keyed by shop domain (and storeKey for convenience)
+  // Tokens
   await tokens.createIndex({ domain: 1 }, { unique: true });
   await tokens.createIndex({ storeKey: 1 }, { unique: true });
 
-  // Meta docs keyed by storeKey
+  // Meta
   await meta.createIndex({ storeKey: 1 }, { unique: true });
   await meta.createIndex({ domain: 1 });
 
-  // Orders keyed by Shopify order id (global ID)
+  // Stores registry
+  await stores.createIndex({ storeKey: 1 }, { unique: true });
+  await stores.createIndex({ domain: 1 }, { unique: true });
+
+  // Orders
   await orders.createIndex({ id: 1 }, { unique: true });
   await orders.createIndex({ createdAt: -1 });
   await orders.createIndex({ updatedAt: -1 });
 }
 
+async function upsertStoresIntoMongo(storesList) {
+  const col = await getStoresCol();
+  await col.createIndex({ storeKey: 1 }, { unique: true });
+  await col.createIndex({ domain: 1 }, { unique: true });
+
+  if (!storesList?.length) return;
+
+  const ops = storesList.map((s) => ({
+    updateOne: {
+      filter: { storeKey: s.storeKey },
+      update: {
+        $set: {
+          storeKey: s.storeKey,
+          groupKey: s.groupKey,
+          domain: s.domain,
+          collection: ordersCollectionName(s.storeKey),
+          updatedAt: new Date(),
+        },
+        $setOnInsert: { createdAt: new Date() },
+      },
+      upsert: true, // creates doc if not exists :contentReference[oaicite:2]{index=2}
+    },
+  }));
+
+  await col.bulkWrite(ops, { ordered: false });
+}
+
 /** -----------------------------
- * 1) Token: fetch + store in Mongo
+ * Token: fetch + store in Mongo
  * ----------------------------*/
 async function fetchClientCredentialsToken({ domain, clientId, clientSecret }) {
+  // NOTE: For embedded apps, Shopify recommends token exchange. :contentReference[oaicite:3]{index=3}
   if (!clientId || !clientSecret) {
-    throw new Error(`Missing client credentials for ${storeHint(domain)}. Check <GROUP>_SHOPIFY_CLIENT_ID/SECRET`);
+    throw new Error(`Missing client credentials for shop=${domain}. Check <GROUP>_SHOPIFY_CLIENT_ID/SECRET`);
   }
 
   const url = `https://${domain}/admin/oauth/access_token`;
@@ -226,7 +257,7 @@ async function fetchClientCredentialsToken({ domain, clientId, clientSecret }) {
   });
 
   const token = resp.data?.access_token;
-  const expiresIn = Number(resp.data?.expires_in ?? 0); // seconds
+  const expiresIn = Number(resp.data?.expires_in ?? 0);
   if (!token) throw new Error(`No access_token returned for ${domain}`);
 
   // Refresh 60 seconds early
@@ -234,10 +265,6 @@ async function fetchClientCredentialsToken({ domain, clientId, clientSecret }) {
   const expiresAtMs = Date.now() + Math.max(1, effective) * 1000;
 
   return { token, expiresIn: expiresIn || 86399, expiresAtMs };
-}
-
-function storeHint(domain) {
-  return domain ? `shop=${domain}` : "shop=<unknown>";
 }
 
 async function readTokenDocByDomain(domain) {
@@ -286,7 +313,7 @@ async function getShopifyToken(store, { force = false } = {}) {
 }
 
 /** -----------------------------
- * Shopify GraphQL (with basic 429 backoff)
+ * Shopify GraphQL (basic 429 backoff)
  * ----------------------------*/
 async function shopifyGraphql({ domain, token, query, variables }) {
   const url = `https://${domain}/admin/api/${API_VERSION}/graphql.json`;
@@ -339,7 +366,7 @@ async function shopifyGraphql({ domain, token, query, variables }) {
 }
 
 /** -----------------------------
- * 2) Orders: fetch + store in Mongo
+ * Orders: fetch + store in Mongo
  * ----------------------------*/
 async function fetchOrdersPage({ domain, token, after, updatedSinceIso }) {
   const q = `
@@ -564,7 +591,7 @@ async function syncAll({ full = false } = {}) {
 }
 
 /** -----------------------------
- * 3) Serve from MongoDB (fast)
+ * Serve: stores + orders + health
  * ----------------------------*/
 app.get("/api/stores", (req, res) => {
   res.json({
@@ -577,6 +604,17 @@ app.get("/api/stores", (req, res) => {
       collection: ordersCollectionName(s.storeKey),
     })),
   });
+});
+
+// Optional: read stores from Mongo registry (useful to confirm “added to DB”)
+app.get("/api/stores-db", async (req, res) => {
+  try {
+    const col = await getStoresCol();
+    const stores = await col.find({}).sort({ storeKey: 1 }).toArray();
+    res.json({ ok: true, count: stores.length, stores });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err?.message || String(err) });
+  }
 });
 
 app.get("/api/orders", async (req, res) => {
@@ -671,7 +709,6 @@ function requireSyncSecret(req, res) {
 app.post("/api/sync-shop", async (req, res) => {
   if (!requireSyncSecret(req, res)) return;
 
-  // Prefer: /api/sync-shop?shop=xxx.myshopify.com
   const shop = normalizeShopDomain(req.query.shop);
   const storeKey = String(req.query.store || "").trim().toLowerCase();
   const full = String(req.query.full || "false").toLowerCase() === "true";
@@ -683,7 +720,9 @@ app.post("/api/sync-shop", async (req, res) => {
   if (!store) {
     return res.status(400).json({
       ok: false,
-      error: "shop or store is required. Example: /api/sync-shop?shop=dm1i1x-d4.myshopify.com",
+      error:
+        "shop or store is required. Example: /api/sync-shop?shop=dm1i1x-d4.myshopify.com " +
+        "or /api/sync-shop?store=cellumove_es",
     });
   }
 
@@ -713,8 +752,18 @@ app.listen(PORT, async () => {
   try {
     await getMongoClient();
     console.log("[mongo] connected");
+
+    // Ensure Mongo has a store registry (so “adding stores to DB” is automatic)
+    await upsertStoresIntoMongo(STORE_REGISTRY.stores);
+    console.log(`[stores] upserted ${STORE_REGISTRY.stores.length} stores into ${STORES_COL}`);
+
+    // Ensure indexes for all stores (optional; keeps things consistent)
+    for (const s of STORE_REGISTRY.stores) {
+      await ensureIndexesForStore(s);
+    }
+    console.log("[indexes] ensured for discovered stores");
   } catch (e) {
-    console.warn("[mongo] connection failed:", e?.message || e);
+    console.warn("[mongo] init failed:", e?.message || e);
   }
 
   if (SYNC_ON_START) {
