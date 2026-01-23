@@ -32,16 +32,19 @@ const SYNC_PAGE_DELAY_MS = Number(process.env.SYNC_PAGE_DELAY_MS || 250);
 
 const SYNC_SECRET = String(process.env.SYNC_SECRET || "").trim();
 
+// IMPORTANT: include all order statuses (closed/cancelled/etc)
+const SHOPIFY_ORDERS_QUERY_BASE = String(process.env.SHOPIFY_ORDERS_QUERY_BASE || "status:any").trim();
+
+// Shopify GraphQL connection page size: max commonly 250
+const SHOPIFY_ORDERS_PAGE_SIZE = Math.max(1, Math.min(Number(process.env.SHOPIFY_ORDERS_PAGE_SIZE || 250), 250));
+
+// Keep error payloads bounded in Mongo/meta
+const MAX_ERROR_DETAIL_CHARS = Number(process.env.MAX_ERROR_DETAIL_CHARS || 4000);
+
 /** -----------------------------
  * Utilities
  * ----------------------------*/
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-function mustEnv(name) {
-  const v = String(process.env[name] || "").trim();
-  if (!v) throw new Error(`Missing env var: ${name}`);
-  return v;
-}
 
 function normalizeShopDomain(shop) {
   return String(shop || "")
@@ -59,14 +62,30 @@ function safeMongoSuffix(s) {
 }
 
 function ordersCollectionName(storeKey) {
-  // Keep your old naming but sanitize storeKey
   return `${ORDERS_PREFIX}${safeMongoSuffix(storeKey)}`;
+}
+
+function truncateDetail(val, max = MAX_ERROR_DETAIL_CHARS) {
+  const s = typeof val === "string" ? val : JSON.stringify(val);
+  if (!s) return "";
+  if (s.length <= max) return s;
+  return s.slice(0, max) + `... (truncated, ${s.length} chars)`;
+}
+
+function parseAxiosError(err) {
+  const status = err?.response?.status ?? err?.shopifyStatus ?? null;
+  const data = err?.response?.data ?? err?.shopifyData ?? null;
+  return {
+    status,
+    data,
+    detail: truncateDetail(data),
+    message: err?.message || String(err),
+  };
 }
 
 /**
  * Discovers ALL stores from env based on SHOP_KEYS groups.
- *
- * For group KEY (e.g. CELLUMOVE), it will include:
+ * For group KEY (e.g. CELLUMOVE), includes:
  * - KEY_SHOPIFY_STORE_DOMAIN
  * - any KEY_*_SHOPIFY_STORE_DOMAIN (CELLUMOVE_ES_..., CELLUMOVE_MX_..., etc)
  *
@@ -78,8 +97,8 @@ function buildStoreRegistryFromEnv() {
   }
 
   const stores = [];
-  const byShop = new Map();     // shop domain -> storeCfg
-  const byStoreKey = new Map(); // storeKey -> storeCfg
+  const byShop = new Map(); // domain -> cfg
+  const byStoreKey = new Map(); // storeKey -> cfg
 
   for (const KEY of SHOP_KEYS) {
     const clientId = String(process.env[`${KEY}_SHOPIFY_CLIENT_ID`] || "").trim();
@@ -99,9 +118,9 @@ function buildStoreRegistryFromEnv() {
 
       const storeKey = envName.replace(/_SHOPIFY_STORE_DOMAIN$/, "").toLowerCase(); // e.g. cellumove_es
       const cfg = {
-        groupKey: KEY.toLowerCase(), // e.g. cellumove
-        storeKey,                    // e.g. cellumove_es
-        domain,                      // e.g. rjhgvi-iz.myshopify.com
+        groupKey: KEY.toLowerCase(),
+        storeKey,
+        domain,
         clientId,
         clientSecret,
       };
@@ -116,7 +135,6 @@ function buildStoreRegistryFromEnv() {
     throw new Error("No *_SHOPIFY_STORE_DOMAIN vars discovered for SHOP_KEYS groups.");
   }
 
-  // Stable order for logs/health
   stores.sort((a, b) => a.storeKey.localeCompare(b.storeKey));
   return { stores, byShop, byStoreKey };
 }
@@ -124,28 +142,22 @@ function buildStoreRegistryFromEnv() {
 const STORE_REGISTRY = buildStoreRegistryFromEnv();
 
 function resolveStoreFromRequest(req) {
-  // Preferred: Shopify calls commonly include `shop`
   const shopQ = normalizeShopDomain(req.query.shop);
   if (shopQ && STORE_REGISTRY.byShop.has(shopQ)) return STORE_REGISTRY.byShop.get(shopQ);
 
-  // Sometimes available as header (webhooks/app proxy setups vary)
   const shopH = normalizeShopDomain(req.headers["x-shopify-shop-domain"]);
   if (shopH && STORE_REGISTRY.byShop.has(shopH)) return STORE_REGISTRY.byShop.get(shopH);
 
-  // Fallback: your legacy param ?store=bloomommy OR ?store=cellumove_es
   const storeQ = String(req.query.store || "").trim().toLowerCase();
   if (storeQ && STORE_REGISTRY.byStoreKey.has(storeQ)) return STORE_REGISTRY.byStoreKey.get(storeQ);
 
-  // Default to first configured store
   return STORE_REGISTRY.stores[0] || null;
 }
 
 /** -----------------------------
- * MongoDB connection (with IPv4 preference)
+ * MongoDB connection
  * ----------------------------*/
-if (!MONGODB_URI) {
-  throw new Error("Missing MONGODB_URI");
-}
+if (!MONGODB_URI) throw new Error("Missing MONGODB_URI");
 
 let _mongoClient = null;
 let _mongoPromise = null;
@@ -154,6 +166,7 @@ async function getMongoClient() {
   if (_mongoClient) return _mongoClient;
 
   if (!_mongoPromise) {
+    // IPv4 preference helps in some environments
     const client = new MongoClient(MONGODB_URI, {
       maxPoolSize: 10,
       serverSelectionTimeoutMS: 10000,
@@ -192,26 +205,49 @@ async function ensureIndexesForStore(store) {
   const meta = await getMetaCol();
   const orders = await getOrdersCol(store.storeKey);
 
-  // Token docs keyed by shop domain (and storeKey for convenience)
   await tokens.createIndex({ domain: 1 }, { unique: true });
   await tokens.createIndex({ storeKey: 1 }, { unique: true });
 
-  // Meta docs keyed by storeKey
   await meta.createIndex({ storeKey: 1 }, { unique: true });
   await meta.createIndex({ domain: 1 });
 
-  // Orders keyed by Shopify order id (global ID)
   await orders.createIndex({ id: 1 }, { unique: true });
   await orders.createIndex({ createdAt: -1 });
   await orders.createIndex({ updatedAt: -1 });
 }
 
 /** -----------------------------
- * 1) Token: fetch + store in Mongo
+ * Meta helpers
+ * ----------------------------*/
+async function getMeta(storeKey) {
+  const meta = await getMetaCol();
+  return meta.findOne({ storeKey });
+}
+
+async function setMeta(store, patch) {
+  const meta = await getMetaCol();
+  await meta.updateOne(
+    { storeKey: store.storeKey },
+    {
+      $set: {
+        storeKey: store.storeKey,
+        domain: store.domain,
+        groupKey: store.groupKey,
+        ...patch,
+        updatedAt: new Date(),
+      },
+      $setOnInsert: { createdAt: new Date() },
+    },
+    { upsert: true }
+  );
+}
+
+/** -----------------------------
+ * Token: fetch + store in Mongo
  * ----------------------------*/
 async function fetchClientCredentialsToken({ domain, clientId, clientSecret }) {
   if (!clientId || !clientSecret) {
-    throw new Error(`Missing client credentials for ${storeHint(domain)}. Check <GROUP>_SHOPIFY_CLIENT_ID/SECRET`);
+    throw new Error(`Missing client credentials for ${domain}. Check <GROUP>_SHOPIFY_CLIENT_ID/SECRET`);
   }
 
   const url = `https://${domain}/admin/oauth/access_token`;
@@ -220,24 +256,27 @@ async function fetchClientCredentialsToken({ domain, clientId, clientSecret }) {
   body.append("client_id", clientId);
   body.append("client_secret", clientSecret);
 
-  const resp = await axios.post(url, body.toString(), {
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    timeout: 30000,
-  });
+  try {
+    const resp = await axios.post(url, body.toString(), {
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      timeout: 30000,
+    });
 
-  const token = resp.data?.access_token;
-  const expiresIn = Number(resp.data?.expires_in ?? 0); // seconds
-  if (!token) throw new Error(`No access_token returned for ${domain}`);
+    const token = resp.data?.access_token;
+    const expiresIn = Number(resp.data?.expires_in ?? 0);
+    if (!token) throw new Error(`No access_token returned for ${domain}`);
 
-  // Refresh 60 seconds early
-  const effective = (expiresIn || 86399) - 60;
-  const expiresAtMs = Date.now() + Math.max(1, effective) * 1000;
+    const effective = (expiresIn || 86399) - 60;
+    const expiresAtMs = Date.now() + Math.max(1, effective) * 1000;
 
-  return { token, expiresIn: expiresIn || 86399, expiresAtMs };
-}
-
-function storeHint(domain) {
-  return domain ? `shop=${domain}` : "shop=<unknown>";
+    return { token, expiresIn: expiresIn || 86399, expiresAtMs };
+  } catch (err) {
+    const parsed = parseAxiosError(err);
+    const e = new Error(`Token mint failed for ${domain} (HTTP ${parsed.status}): ${parsed.detail}`);
+    e.shopifyStatus = parsed.status;
+    e.shopifyData = parsed.data;
+    throw e;
+  }
 }
 
 async function readTokenDocByDomain(domain) {
@@ -286,12 +325,43 @@ async function getShopifyToken(store, { force = false } = {}) {
 }
 
 /** -----------------------------
- * Shopify GraphQL (with basic 429 backoff)
+ * Shopify GraphQL
+ * - Handles HTTP 429
+ * - Handles GraphQL THROTTLED errors (HTTP 200 with errors)
+ * - Captures error payloads for debugging
  * ----------------------------*/
+function isThrottledGraphQLError(graphQLErrors) {
+  if (!Array.isArray(graphQLErrors)) return false;
+  return graphQLErrors.some((e) => {
+    const msg = String(e?.message || "").toUpperCase();
+    const code = String(e?.extensions?.code || "").toUpperCase();
+    return msg.includes("THROTTLED") || code === "THROTTLED";
+  });
+}
+
+function computeThrottleBackoffMs(respData, attempt) {
+  // Shopify GraphQL returns cost/throttleStatus in extensions. :contentReference[oaicite:3]{index=3}
+  const throttle = respData?.extensions?.cost?.throttleStatus;
+  const restoreRate = Number(throttle?.restoreRate || 0);
+  const currentlyAvailable = Number(throttle?.currentlyAvailable || 0);
+
+  // baseline exponential (1s, 2s, 4s...)
+  let ms = 1000 * Math.pow(2, attempt);
+
+  // If we're near empty and have restoreRate, wait enough to regain some capacity
+  if (restoreRate > 0 && currentlyAvailable < 50) {
+    const seconds = Math.ceil((50 - currentlyAvailable) / restoreRate);
+    ms = Math.max(ms, seconds * 1000);
+  }
+
+  // cap to 30s per retry
+  return Math.min(ms, 30000);
+}
+
 async function shopifyGraphql({ domain, token, query, variables }) {
   const url = `https://${domain}/admin/api/${API_VERSION}/graphql.json`;
 
-  const maxRetries = 6;
+  const maxRetries = 8;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       const resp = await axios.post(
@@ -306,8 +376,15 @@ async function shopifyGraphql({ domain, token, query, variables }) {
         }
       );
 
+      // GraphQL throttling often appears as errors (HTTP 200). :contentReference[oaicite:4]{index=4}
       if (resp.data?.errors?.length) {
-        const e = new Error("Shopify GraphQL returned errors");
+        if (isThrottledGraphQLError(resp.data.errors) && attempt < maxRetries) {
+          const waitMs = computeThrottleBackoffMs(resp.data, attempt);
+          await sleep(waitMs);
+          continue;
+        }
+
+        const e = new Error(`Shopify GraphQL returned errors: ${truncateDetail(resp.data)}`);
         e.shopifyStatus = 200;
         e.shopifyData = resp.data;
         throw e;
@@ -317,30 +394,40 @@ async function shopifyGraphql({ domain, token, query, variables }) {
     } catch (err) {
       const status = err?.response?.status ?? err.shopifyStatus ?? null;
 
+      // HTTP 429 backoff
       if (status === 429 && attempt < maxRetries) {
         const backoffMs = 1000 * Math.pow(2, attempt);
-        await sleep(backoffMs);
+        await sleep(Math.min(backoffMs, 30000));
         continue;
       }
 
+      // 401: allow caller to refresh token
       if (status === 401) {
-        const e = new Error("Unauthorized (401) from Shopify");
+        const e = new Error(`Unauthorized (401) from Shopify: ${truncateDetail(err?.response?.data || err.shopifyData)}`);
         e.shopifyStatus = 401;
         e.shopifyData = err?.response?.data || err.shopifyData || null;
         throw e;
       }
 
-      const e = new Error(err.message || "Shopify request failed");
-      e.shopifyStatus = status;
-      e.shopifyData = err?.response?.data || err.shopifyData || null;
+      const parsed = parseAxiosError(err);
+      const e = new Error(`Shopify request failed (HTTP ${parsed.status}): ${parsed.detail}`);
+      e.shopifyStatus = parsed.status;
+      e.shopifyData = parsed.data;
       throw e;
     }
   }
 }
 
 /** -----------------------------
- * 2) Orders: fetch + store in Mongo
+ * Orders: fetch + store in Mongo
  * ----------------------------*/
+function buildOrdersQueryString(updatedSinceIso) {
+  const terms = [];
+  if (SHOPIFY_ORDERS_QUERY_BASE) terms.push(SHOPIFY_ORDERS_QUERY_BASE);
+  if (updatedSinceIso) terms.push(`updated_at:>=${updatedSinceIso}`);
+  return terms.length ? terms.join(" AND ") : null;
+}
+
 async function fetchOrdersPage({ domain, token, after, updatedSinceIso }) {
   const q = `
     query OrdersPage($first: Int!, $after: String, $query: String) {
@@ -374,13 +461,13 @@ async function fetchOrdersPage({ domain, token, after, updatedSinceIso }) {
     }
   `;
 
-  const queryString = updatedSinceIso ? `updated_at:>=${updatedSinceIso}` : null;
+  const queryString = buildOrdersQueryString(updatedSinceIso);
 
   const data = await shopifyGraphql({
     domain,
     token,
     query: q,
-    variables: { first: 250, after: after || null, query: queryString },
+    variables: { first: SHOPIFY_ORDERS_PAGE_SIZE, after: after || null, query: queryString },
   });
 
   const conn = data?.orders;
@@ -419,29 +506,6 @@ async function bulkUpsertOrders(storeKey, orders) {
   return (res.upsertedCount || 0) + (res.modifiedCount || 0);
 }
 
-async function getMeta(storeKey) {
-  const meta = await getMetaCol();
-  return meta.findOne({ storeKey });
-}
-
-async function setMeta(store, patch) {
-  const meta = await getMetaCol();
-  await meta.updateOne(
-    { storeKey: store.storeKey },
-    {
-      $set: {
-        storeKey: store.storeKey,
-        domain: store.domain,
-        groupKey: store.groupKey,
-        ...patch,
-        updatedAt: new Date(),
-      },
-      $setOnInsert: { createdAt: new Date() },
-    },
-    { upsert: true }
-  );
-}
-
 async function estimatedOrderCount(storeKey) {
   const col = await getOrdersCol(storeKey);
   return col.estimatedDocumentCount();
@@ -452,9 +516,7 @@ async function estimatedOrderCount(storeKey) {
  * ----------------------------*/
 const syncLocks = new Map(); // storeKey -> Promise
 
-async function syncStore(store, { full = false } = {}) {
-  if (!store?.storeKey) throw new Error("syncStore requires a store config");
-
+async function syncStore(store, { full = false, clear = false } = {}) {
   const key = String(store.storeKey).toLowerCase();
   if (syncLocks.has(key)) return syncLocks.get(key);
 
@@ -478,11 +540,22 @@ async function syncStore(store, { full = false } = {}) {
     await setMeta(store, {
       status: "running",
       startedAt: new Date(),
+      finishedAt: null,
       error: null,
+      errorStatus: null,
+      errorDetail: null,
       mode: modeFull ? "full" : "incremental",
       priorCachedCount: count,
-      note: null,
+      pages: 0,
+      lastRunUpserts: 0,
+      note: modeFull ? "Full sync starting" : "Incremental sync starting",
     });
+
+    if (modeFull && clear) {
+      const ordersCol = await getOrdersCol(key);
+      await ordersCol.deleteMany({});
+      await setMeta(store, { note: "Cleared orders collection before full sync." });
+    }
 
     let auth = await getShopifyToken(store);
 
@@ -516,12 +589,23 @@ async function syncStore(store, { full = false } = {}) {
         after = page.endCursor;
         await sleep(SYNC_PAGE_DELAY_MS);
       } catch (e) {
+        // If token invalid, refresh and retry this page
         if (e.shopifyStatus === 401) {
           await setMeta(store, { note: "401 from Shopify: refreshing token and retrying..." });
           auth = await getShopifyToken(store, { force: true });
           await sleep(250);
           continue;
         }
+
+        // Persist full 4xx/5xx payload detail
+        const parsed = parseAxiosError(e);
+        await setMeta(store, {
+          error: parsed.message,
+          errorStatus: parsed.status,
+          errorDetail: parsed.detail,
+          note: "Sync failed; see errorDetail",
+        });
+
         throw e;
       }
     }
@@ -534,18 +618,23 @@ async function syncStore(store, { full = false } = {}) {
       lastRunUpserts: upserts,
       lastSyncedUpdatedAt: watermark,
       error: null,
+      errorStatus: null,
+      errorDetail: null,
       note: null,
     });
 
-    return { ok: true, storeKey: key, domain: store.domain, pages, upserts, watermark: watermark.toISOString() };
+    return { ok: true, storeKey: key, pages, upserts, watermark: watermark.toISOString() };
   })()
     .catch(async (err) => {
+      const parsed = parseAxiosError(err);
       await setMeta(store, {
         status: "error",
         finishedAt: new Date(),
-        error: err?.message || String(err),
+        error: parsed.message,
+        errorStatus: parsed.status,
+        errorDetail: parsed.detail,
       });
-      return { ok: false, storeKey: store.storeKey, domain: store.domain, error: err?.message || String(err) };
+      return { ok: false, storeKey: store.storeKey, error: parsed.message, status: parsed.status };
     })
     .finally(() => {
       syncLocks.delete(key);
@@ -555,17 +644,27 @@ async function syncStore(store, { full = false } = {}) {
   return p;
 }
 
-async function syncAll({ full = false } = {}) {
+async function syncAll({ full = false, clear = false } = {}) {
   const results = [];
   for (const store of STORE_REGISTRY.stores) {
-    results.push(await syncStore(store, { full }));
+    results.push(await syncStore(store, { full, clear }));
   }
   return results;
 }
 
 /** -----------------------------
- * 3) Serve from MongoDB (fast)
+ * API endpoints
  * ----------------------------*/
+function requireSyncSecret(req, res) {
+  if (!SYNC_SECRET) return true;
+  const provided = String(req.headers["x-sync-secret"] || "").trim();
+  if (provided !== SYNC_SECRET) {
+    res.status(401).json({ ok: false, error: "Unauthorized" });
+    return false;
+  }
+  return true;
+}
+
 app.get("/api/stores", (req, res) => {
   res.json({
     ok: true,
@@ -579,16 +678,15 @@ app.get("/api/stores", (req, res) => {
   });
 });
 
+// Read cached orders from Mongo with pagination
 app.get("/api/orders", async (req, res) => {
   const store = resolveStoreFromRequest(req);
-  const limit = Math.max(0, Math.min(Number(req.query.limit || 200) || 200, 5000));
+  const limit = Math.max(1, Math.min(Number(req.query.limit || 200) || 200, 5000));
+  const skip = Math.max(0, Number(req.query.skip || 0) || 0);
 
   try {
     if (!store) {
-      return res.status(400).json({
-        ok: false,
-        error: "Unknown store. Pass ?shop={shop}.myshopify.com (preferred) or ?store={storeKey}.",
-      });
+      return res.status(400).json({ ok: false, error: "Unknown store. Use ?store=... or ?shop=...myshopify.com" });
     }
 
     if (SYNC_ON_READ) {
@@ -596,7 +694,7 @@ app.get("/api/orders", async (req, res) => {
     }
 
     const col = await getOrdersCol(store.storeKey);
-    const orders = await col.find({}).sort({ createdAt: -1 }).limit(limit).toArray();
+    const orders = await col.find({}).sort({ createdAt: -1 }).skip(skip).limit(limit).toArray();
 
     res.json({
       ok: true,
@@ -605,12 +703,10 @@ app.get("/api/orders", async (req, res) => {
       shop: store.domain,
       source: "mongodb",
       collection: ordersCollectionName(store.storeKey),
+      skip,
+      limit,
       count: orders.length,
       orders,
-      note:
-        orders.length === 0
-          ? "No cached orders yet. Trigger POST /api/sync-shop?shop=... (or /api/sync-all) and check /api/health."
-          : undefined,
     });
   } catch (err) {
     res.status(500).json({ ok: false, error: err?.message || String(err) });
@@ -638,7 +734,10 @@ app.get("/api/health", async (req, res) => {
         mode: m?.mode || null,
         lastSyncedUpdatedAt: m?.lastSyncedUpdatedAt || null,
         lastRunUpserts: m?.lastRunUpserts || 0,
+        pages: m?.pages || null,
         error: m?.error || null,
+        errorStatus: m?.errorStatus || null,
+        errorDetail: m?.errorDetail || null, // IMPORTANT: shows 400 body
         note: m?.note || null,
       });
     }
@@ -648,6 +747,7 @@ app.get("/api/health", async (req, res) => {
       db: MONGODB_DB,
       groups: SHOP_KEYS.map((k) => k.toLowerCase()),
       stores: STORE_REGISTRY.stores.map((s) => s.storeKey),
+      ordersQueryBase: SHOPIFY_ORDERS_QUERY_BASE,
       snapshot,
     });
   } catch (err) {
@@ -655,26 +755,14 @@ app.get("/api/health", async (req, res) => {
   }
 });
 
-/** -----------------------------
- * Manual sync endpoints
- * ----------------------------*/
-function requireSyncSecret(req, res) {
-  if (!SYNC_SECRET) return true;
-  const provided = String(req.headers["x-sync-secret"] || "").trim();
-  if (provided !== SYNC_SECRET) {
-    res.status(401).json({ ok: false, error: "Unauthorized" });
-    return false;
-  }
-  return true;
-}
-
 app.post("/api/sync-shop", async (req, res) => {
   if (!requireSyncSecret(req, res)) return;
 
-  // Prefer: /api/sync-shop?shop=xxx.myshopify.com
+  const full = String(req.query.full || "false").toLowerCase() === "true";
+  const clear = String(req.query.clear || "false").toLowerCase() === "true";
+
   const shop = normalizeShopDomain(req.query.shop);
   const storeKey = String(req.query.store || "").trim().toLowerCase();
-  const full = String(req.query.full || "false").toLowerCase() === "true";
 
   let store = null;
   if (shop && STORE_REGISTRY.byShop.has(shop)) store = STORE_REGISTRY.byShop.get(shop);
@@ -683,32 +771,65 @@ app.post("/api/sync-shop", async (req, res) => {
   if (!store) {
     return res.status(400).json({
       ok: false,
-      error: "shop or store is required. Example: /api/sync-shop?shop=dm1i1x-d4.myshopify.com",
+      error: "Use /api/sync-shop?store=cellumove_es or /api/sync-shop?shop=xxxx.myshopify.com",
     });
   }
 
-  syncStore(store, { full }).catch(() => {});
-  res.json({ ok: true, started: true, store: store.storeKey, shop: store.domain, full });
+  syncStore(store, { full, clear }).catch(() => {});
+  res.json({ ok: true, started: true, store: store.storeKey, shop: store.domain, full, clear });
 });
 
 app.post("/api/sync-all", async (req, res) => {
   if (!requireSyncSecret(req, res)) return;
 
   const full = String(req.query.full || "false").toLowerCase() === "true";
-  syncAll({ full }).catch(() => {});
-  res.json({ ok: true, started: true, stores: STORE_REGISTRY.stores.map((s) => s.storeKey), full });
+  const clear = String(req.query.clear || "false").toLowerCase() === "true";
+
+  syncAll({ full, clear }).catch(() => {});
+  res.json({ ok: true, started: true, stores: STORE_REGISTRY.stores.map((s) => s.storeKey), full, clear });
+});
+
+// Verify granted scopes for a given shop/store using currentAppInstallation
+app.get("/api/scopes", async (req, res) => {
+  const store = resolveStoreFromRequest(req);
+  if (!store) return res.status(400).json({ ok: false, error: "Unknown store. Use ?store=... or ?shop=..." });
+
+  try {
+    const auth = await getShopifyToken(store, { force: false });
+
+    const q = `
+      query {
+        currentAppInstallation {
+          accessScopes { handle }
+        }
+      }
+    `;
+
+    const data = await shopifyGraphql({ domain: auth.domain, token: auth.token, query: q, variables: {} });
+    const scopes = data?.currentAppInstallation?.accessScopes?.map((s) => s.handle) || [];
+
+    res.json({
+      ok: true,
+      store: store.storeKey,
+      shop: store.domain,
+      scopes,
+      has_read_all_orders: scopes.includes("read_all_orders"),
+    });
+  } catch (err) {
+    const parsed = parseAxiosError(err);
+    res.status(500).json({ ok: false, error: parsed.message, status: parsed.status, detail: parsed.detail });
+  }
 });
 
 /** -----------------------------
  * Boot
  * ----------------------------*/
 app.listen(PORT, async () => {
-  console.log(`Server running: http://localhost:${PORT}/api/orders`);
+  console.log(`Server running: http://localhost:${PORT}`);
   console.log(`API_VERSION=${API_VERSION}`);
   console.log(`MongoDB db=${MONGODB_DB}`);
-  console.log(`Groups=${SHOP_KEYS.map((k) => k.toLowerCase()).join(", ")}`);
+  console.log(`Orders query base="${SHOPIFY_ORDERS_QUERY_BASE}"`);
   console.log(`Discovered stores=${STORE_REGISTRY.stores.map((s) => `${s.storeKey}=>${s.domain}`).join(", ")}`);
-  console.log(`Orders collections: ${ORDERS_PREFIX}<storeKey>`);
 
   try {
     await getMongoClient();
@@ -718,8 +839,8 @@ app.listen(PORT, async () => {
   }
 
   if (SYNC_ON_START) {
-    syncAll({ full: false }).catch(() => {});
-    console.log("[sync] started on boot (incremental, full if empty)");
+    syncAll({ full: false, clear: false }).catch(() => {});
+    console.log("[sync] started on boot (incremental; full if empty)");
   }
 });
 

@@ -1,27 +1,14 @@
 import "./App.css";
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useCallback } from "react";
 import axios from "axios";
 import Table from "./components/table";
 import * as XLSX from "xlsx-js-style";
 import ShopifyTable from "./components/ShopifyTable";
 
-// Backend base URL
-// - In production: set REACT_APP_API_BASE (e.g. https://your-backend-domain.com)
-// - Local dev: http://localhost:4000
+// If you want, set REACT_APP_API_BASE in your frontend env (Vercel):
+// REACT_APP_API_BASE=https://shopify-invoice-checker-backend.onrender.com
 const API_BASE =
-  (process.env.REACT_APP_API_BASE || "").trim() ||
-  "https://shopify-invoice-checker-backend.onrender.com";
-
-// In Shopify Admin iframe context, the app URL includes `?shop=<shop>.myshopify.com`.
-// We use this to automatically choose the correct store.
-const getShopFromUrl = () => {
-  try {
-    const params = new URLSearchParams(window.location.search);
-    return String(params.get("shop") || "").trim();
-  } catch {
-    return "";
-  }
-};
+  (process.env.REACT_APP_API_BASE || "https://shopify-invoice-checker-backend.onrender.com").replace(/\/+$/, "");
 
 // Helper to parse totals from Oct prices (strip currency etc)
 /* ---------------- Existing helpers ---------------- */
@@ -36,7 +23,7 @@ function parsePrice(val) {
   const num = Number(s);
   return isNaN(num) ? NaN : num;
 }
- 
+
 const COUNTRY_COLUMNS = {
   FR: { total: "Total to FR", upsell: "Upsell to FR" },
   BE: { total: "Total to BE", upsell: "Upsell to BE" },
@@ -87,7 +74,7 @@ function computeOrderResult(orderRows, priceIndex) {
     orderRows.find((r) => r["Country"] && String(r["Country"]).trim() !== "") || null;
   const country = countryRow ? String(countryRow["Country"]).trim() : null;
   const countryCols = COUNTRY_COLUMNS[country] || null;
- 
+
   const groups = {};
   orderRows.forEach((row) => {
     const skuBase = row["SKU.1"] || row["SKU"];
@@ -304,12 +291,15 @@ function App() {
   const [resultsSortDir, setResultsSortDir] = useState("asc");
 
   // Shopify
-  const [stores, setStores] = useState([]); // [{ key, domain }]
-  const [installedShop, setInstalledShop] = useState(getShopFromUrl());
-  const [selectedStore, setSelectedStore] = useState("bloomommy"); // default; will auto-select by ?shop
+  const [selectedStore, setSelectedStore] = useState(""); // set after /api/stores loads
   const [shopifyLoading, setShopifyLoading] = useState(false);
   const [shopifyError, setShopifyError] = useState("");
   const [orders, setOrders] = useState([]);
+
+  // Stores list (dynamic)
+  const [availableStores, setAvailableStores] = useState([]);
+  const [storesLoading, setStoresLoading] = useState(false);
+  const [storesError, setStoresError] = useState("");
 
   const [orderSearch, setOrderSearch] = useState("");
 
@@ -319,35 +309,6 @@ function App() {
   };
 
   const orderSearchNum = useMemo(() => getDigits(orderSearch), [orderSearch]);
-
-  const normalizeShopDomain = (v) =>
-    String(v || "")
-      .trim()
-      .toLowerCase()
-      .replace(/^https?:\/\//, "")
-      .replace(/\/.*/, "");
-
-  // Load store list from backend, then auto-select the store matching the Shopify `?shop=` parameter.
-  useEffect(() => {
-    const loadStores = async () => {
-      try {
-        const resp = await axios.get(`${API_BASE}/api/stores`);
-        const list = Array.isArray(resp.data?.stores) ? resp.data.stores : [];
-        setStores(list);
-
-        const shop = normalizeShopDomain(installedShop);
-        if (shop) {
-          const match = list.find((s) => normalizeShopDomain(s?.domain) === shop);
-          if (match?.key) setSelectedStore(String(match.key));
-        }
-      } catch (e) {
-        // Non-fatal: the app can still run with the selectedStore default.
-        console.error("Failed to load store list:", e);
-      }
-    };
-
-    loadStores();
-  }, [installedShop]);
 
   // ✅ Filter Shopify orders once so ALL UI uses clean data (no removed items, no E-book)
   const filteredShopifyOrders = useMemo(() => {
@@ -441,28 +402,61 @@ function App() {
   }, [ordersFile, orderSearchNum]);
 
   useEffect(() => {
-    // Prevent scroll + weird interactions while loading
     if (shopifyLoading) {
       document.body.classList.add("no-scroll");
     } else {
       document.body.classList.remove("no-scroll");
     }
-
     return () => document.body.classList.remove("no-scroll");
   }, [shopifyLoading]);
 
+  // Load stores from backend
+  const fetchStores = useCallback(async () => {
+    setStoresLoading(true);
+    setStoresError("");
+
+    try {
+      const resp = await axios.get(`${API_BASE}/api/stores`);
+      const stores = Array.isArray(resp.data?.stores) ? resp.data.stores : [];
+      setAvailableStores(stores);
+
+      // If no store selected yet, default to first from API
+      if (!selectedStore && stores.length > 0) {
+        setSelectedStore(stores[0].storeKey);
+      }
+
+      // If selectedStore is no longer valid, fall back
+      if (selectedStore && stores.length > 0) {
+        const stillExists = stores.some((s) => s.storeKey === selectedStore);
+        if (!stillExists) setSelectedStore(stores[0].storeKey);
+      }
+    } catch (err) {
+      console.error("Error fetching stores:", err);
+      setAvailableStores([]);
+      setStoresError(err?.response?.data?.error || "Failed to load stores list from /api/stores.");
+
+      // Keep app usable: fallback default store
+      if (!selectedStore) setSelectedStore("bloomommy");
+    } finally {
+      setStoresLoading(false);
+    }
+  }, [selectedStore]);
+
+  useEffect(() => {
+    fetchStores();
+  }, [fetchStores]);
+
+  // Fetch Shopify orders for selected storeKey
   useEffect(() => {
     const fetchOrders = async () => {
+      if (!selectedStore) return;
+
       setShopifyLoading(true);
       setShopifyError("");
 
       try {
         const response = await axios.get(`${API_BASE}/api/orders`, {
-          // Pass `shop` when embedded in Shopify Admin so backend can resolve to the installed store.
-          params: {
-            store: selectedStore,
-            shop: installedShop || undefined,
-          },
+          params: { store: selectedStore },
         });
 
         const apiOrders = response.data?.orders;
@@ -477,7 +471,7 @@ function App() {
     };
 
     fetchOrders();
-  }, [selectedStore, installedShop]);
+  }, [selectedStore]);
 
   const handleRunCheck = () => {
     if (!ordersFile || !ordersFile.rows || !pricesFile || !pricesFile.rows) {
@@ -522,7 +516,6 @@ function App() {
       let itemsCompared = 0;
 
       if (shopifyOrderForCompare) {
-        // ✅ Variant ignored in both signatures
         const trackingSig = buildTrackingSignature(orderRows, trackingCols);
         const shopifySig = buildShopifySignature(shopifyOrderForCompare);
         itemsCompared = trackingSig.length;
@@ -607,15 +600,13 @@ function App() {
     XLSX.writeFile(wb, "Orders_tracking_corrected.xlsx");
   };
 
-  const lockedToInstalledShop = useMemo(() => {
-    const shop = normalizeShopDomain(installedShop);
-    if (!shop) return false;
-    return (stores || []).some((s) => normalizeShopDomain(s?.domain) === shop);
-  }, [stores, installedShop]);
+  const selectedStoreMeta = useMemo(() => {
+    if (!availableStores?.length || !selectedStore) return null;
+    return availableStores.find((s) => s.storeKey === selectedStore) || null;
+  }, [availableStores, selectedStore]);
 
   return (
     <div className={`App ${shopifyLoading ? "is-loading" : ""}`}>
-
       <h1 style={{ color: "#fff", margin: 20 }}>INVOICE CHECKER</h1>
 
       <div className="controls">
@@ -625,37 +616,63 @@ function App() {
         <button className="button secondary" onClick={handleDownload} disabled={shopifyLoading}>
           DOWNLOAD CORRECTED INVOICE FILE
         </button>
+
         {message && <div className="status-message">{message}</div>}
 
-        <div style={{ display: "flex", gap: 12, alignItems: "center", marginLeft: 20, marginTop: 10 }}>
+        <div style={{ display: "flex", gap: 12, alignItems: "center", marginLeft: 20, marginTop: 10, flexWrap: "wrap" }}>
           <label style={{ color: "#fff", fontWeight: 700 }}>Store:</label>
 
           <select
             value={selectedStore}
             onChange={(e) => setSelectedStore(e.target.value)}
-            disabled={shopifyLoading || lockedToInstalledShop}
+            disabled={shopifyLoading || storesLoading}
             style={{
               padding: "8px 10px",
               borderRadius: 10,
               border: "1px solid rgba(255,255,255,0.25)",
               outline: "none",
+              minWidth: 260,
             }}
           >
-            {(stores?.length ? stores : [{ key: "bloomommy", domain: "" }]).map((s) => (
-              <option key={s.key} value={s.key}>
-                {s.key}
-              </option>
-            ))}
+            {/* Preferred: dynamic stores from /api/stores */}
+            {availableStores?.length > 0 ? (
+              availableStores.map((s) => (
+                <option key={s.storeKey} value={s.storeKey}>
+                  {s.storeKey}
+                  {s.domain ? ` (${s.domain})` : ""}
+                </option>
+              ))
+            ) : (
+              // Fallback if /api/stores fails
+              <>
+                <option value="bloomommy">bloomommy</option>
+                <option value="cellumove">cellumove</option>
+                <option value="yuma">yuma</option>
+              </>
+            )}
           </select>
 
-          {lockedToInstalledShop && installedShop ? (
-            <span style={{ color: "rgba(255,255,255,0.85)", fontSize: 12 }}>
-              Installed store: {installedShop}
-            </span>
-          ) : null}
+          <button
+            type="button"
+            className="button small"
+            onClick={fetchStores}
+            disabled={storesLoading || shopifyLoading}
+            style={{ padding: "8px 10px" }}
+          >
+            Refresh Stores
+          </button>
 
-          {shopifyLoading && <span style={{ color: "#fff" }}>Loading…</span>}
+          {storesLoading && <span style={{ color: "#fff" }}>Loading stores…</span>}
+          {storesError && <span style={{ color: "#ffb3b3" }}>{storesError}</span>}
+
+          {shopifyLoading && <span style={{ color: "#fff" }}>Loading orders…</span>}
           {shopifyError && <span style={{ color: "#ffb3b3" }}>{shopifyError}</span>}
+
+          {selectedStoreMeta?.groupKey && (
+            <span style={{ color: "#fff", opacity: 0.9 }}>
+              Group: <strong>{selectedStoreMeta.groupKey}</strong>
+            </span>
+          )}
         </div>
       </div>
 
@@ -821,6 +838,7 @@ function App() {
           </div>
         </div>
       )}
+
       {shopifyLoading && (
         <div className="loading-overlay" role="alert" aria-busy="true" aria-live="polite">
           <div className="loading-card">
