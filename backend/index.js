@@ -681,7 +681,7 @@ app.get("/api/stores", (req, res) => {
 // Read cached orders from Mongo with pagination
 app.get("/api/orders", async (req, res) => {
   const store = resolveStoreFromRequest(req);
-  const limit = Math.max(1, Math.min(Number(req.query.limit || 200) || 200, 5000));
+  // const limit = Math.max(1, Math.min(Number(req.query.limit || 200) || 200, 5000));
   const skip = Math.max(0, Number(req.query.skip || 0) || 0);
 
   try {
@@ -694,7 +694,7 @@ app.get("/api/orders", async (req, res) => {
     }
 
     const col = await getOrdersCol(store.storeKey);
-    const orders = await col.find({}).sort({ createdAt: -1 }).skip(skip).limit(limit).toArray();
+    const orders = await col.find({}).sort({ createdAt: -1 }).toArray();//.skip(skip).limit(limit)
 
     res.json({
       ok: true,
@@ -704,7 +704,7 @@ app.get("/api/orders", async (req, res) => {
       source: "mongodb",
       collection: ordersCollectionName(store.storeKey),
       skip,
-      limit,
+      // limit,
       count: orders.length,
       orders,
     });
@@ -845,3 +845,4 @@ app.listen(PORT, async () => {
 });
 
 module.exports = app;
+ 
