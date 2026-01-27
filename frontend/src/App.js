@@ -7,7 +7,7 @@ import ShopifyTable from "./components/ShopifyTable";
 
 // If you want, set REACT_APP_API_BASE in your frontend env (Vercel):
 // REACT_APP_API_BASE=https://shopify-invoice-checker-backend.onrender.com
-const API_BASE =
+const API_BASE = //"https://localhost:4000";
   (process.env.REACT_APP_API_BASE || "https://shopify-invoice-checker-backend.onrender.com").replace(/\/+$/, "");
 
 // Helper to parse totals from Oct prices (strip currency etc)
@@ -70,8 +70,7 @@ function computeOrderResult(orderRows, priceIndex) {
 
   const orderNo = orderRows[0]["Order#"];
 
-  const countryRow =
-    orderRows.find((r) => r["Country"] && String(r["Country"]).trim() !== "") || null;
+  const countryRow = orderRows.find((r) => r["Country"] && String(r["Country"]).trim() !== "") || null;
   const country = countryRow ? String(countryRow["Country"]).trim() : null;
   const countryCols = COUNTRY_COLUMNS[country] || null;
 
@@ -110,13 +109,10 @@ function computeOrderResult(orderRows, priceIndex) {
 
   const expectedTotal = baseTotal + upsellTotal;
 
-  const totalRow = orderRows.find(
-    (r) => r["Total"] !== null && r["Total"] !== undefined && r["Total"] !== ""
-  );
+  const totalRow = orderRows.find((r) => r["Total"] !== null && r["Total"] !== undefined && r["Total"] !== "");
   const reportedTotal = totalRow ? Number(totalRow["Total"]) : NaN;
 
-  const difference =
-    !isNaN(expectedTotal) && !isNaN(reportedTotal) ? reportedTotal - expectedTotal : NaN;
+  const difference = !isNaN(expectedTotal) && !isNaN(reportedTotal) ? reportedTotal - expectedTotal : NaN;
 
   const status = isNaN(difference) || Math.abs(difference) <= 0.01 ? "ok" : "mismatch";
 
@@ -446,7 +442,7 @@ function App() {
     fetchStores();
   }, [fetchStores]);
 
-  // Fetch Shopify orders for selected storeKey
+  // Fetch Shopify orders for selected storeKey (NO LIMITS)
   useEffect(() => {
     const fetchOrders = async () => {
       if (!selectedStore) return;
@@ -456,7 +452,7 @@ function App() {
 
       try {
         const response = await axios.get(`${API_BASE}/api/orders`, {
-          params: { store: selectedStore },
+          params: { store: selectedStore, all: true }, // ✅ key change: fetch all cached orders
         });
 
         const apiOrders = response.data?.orders;
@@ -545,9 +541,7 @@ function App() {
     });
 
     const existingCols = ordersFile.columns || Object.keys(ordersRows[0] || {});
-    const correctedColumns = existingCols.includes("Corrected Total")
-      ? existingCols
-      : [...existingCols, "Corrected Total"];
+    const correctedColumns = existingCols.includes("Corrected Total") ? existingCols : [...existingCols, "Corrected Total"];
 
     setCorrectedOrders({ rows: correctedRows, columns: correctedColumns });
 
@@ -634,7 +628,6 @@ function App() {
               minWidth: 260,
             }}
           >
-            {/* Preferred: dynamic stores from /api/stores */}
             {availableStores?.length > 0 ? (
               availableStores.map((s) => (
                 <option key={s.storeKey} value={s.storeKey}>
@@ -643,7 +636,6 @@ function App() {
                 </option>
               ))
             ) : (
-              // Fallback if /api/stores fails
               <>
                 <option value="bloomommy">bloomommy</option>
                 <option value="cellumove">cellumove</option>

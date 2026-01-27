@@ -680,7 +680,7 @@ app.get("/api/orders", async (req, res) => {
   const all = String(req.query.all || "false").toLowerCase() === "true";
 
   // Normal paginated mode
-  const limit = Math.max(1, Math.max(Number(req.query.limit) || 5000));
+  const limit = Math.max(1, Math.min(Number(req.query.limit) || 5000));
   const skip = Math.max(0, Number(req.query.skip || 0) || 0);
 
   try {
