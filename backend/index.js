@@ -340,21 +340,17 @@ function isThrottledGraphQLError(graphQLErrors) {
 }
 
 function computeThrottleBackoffMs(respData, attempt) {
-  // Shopify GraphQL returns cost/throttleStatus in extensions. :contentReference[oaicite:3]{index=3}
   const throttle = respData?.extensions?.cost?.throttleStatus;
   const restoreRate = Number(throttle?.restoreRate || 0);
   const currentlyAvailable = Number(throttle?.currentlyAvailable || 0);
 
-  // baseline exponential (1s, 2s, 4s...)
   let ms = 1000 * Math.pow(2, attempt);
 
-  // If we're near empty and have restoreRate, wait enough to regain some capacity
   if (restoreRate > 0 && currentlyAvailable < 50) {
     const seconds = Math.ceil((50 - currentlyAvailable) / restoreRate);
     ms = Math.max(ms, seconds * 1000);
   }
 
-  // cap to 30s per retry
   return Math.min(ms, 30000);
 }
 
@@ -376,7 +372,6 @@ async function shopifyGraphql({ domain, token, query, variables }) {
         }
       );
 
-      // GraphQL throttling often appears as errors (HTTP 200). :contentReference[oaicite:4]{index=4}
       if (resp.data?.errors?.length) {
         if (isThrottledGraphQLError(resp.data.errors) && attempt < maxRetries) {
           const waitMs = computeThrottleBackoffMs(resp.data, attempt);
@@ -394,16 +389,16 @@ async function shopifyGraphql({ domain, token, query, variables }) {
     } catch (err) {
       const status = err?.response?.status ?? err.shopifyStatus ?? null;
 
-      // HTTP 429 backoff
       if (status === 429 && attempt < maxRetries) {
         const backoffMs = 1000 * Math.pow(2, attempt);
         await sleep(Math.min(backoffMs, 30000));
         continue;
       }
 
-      // 401: allow caller to refresh token
       if (status === 401) {
-        const e = new Error(`Unauthorized (401) from Shopify: ${truncateDetail(err?.response?.data || err.shopifyData)}`);
+        const e = new Error(
+          `Unauthorized (401) from Shopify: ${truncateDetail(err?.response?.data || err.shopifyData)}`
+        );
         e.shopifyStatus = 401;
         e.shopifyData = err?.response?.data || err.shopifyData || null;
         throw e;
@@ -589,7 +584,6 @@ async function syncStore(store, { full = false, clear = false } = {}) {
         after = page.endCursor;
         await sleep(SYNC_PAGE_DELAY_MS);
       } catch (e) {
-        // If token invalid, refresh and retry this page
         if (e.shopifyStatus === 401) {
           await setMeta(store, { note: "401 from Shopify: refreshing token and retrying..." });
           auth = await getShopifyToken(store, { force: true });
@@ -597,7 +591,6 @@ async function syncStore(store, { full = false, clear = false } = {}) {
           continue;
         }
 
-        // Persist full 4xx/5xx payload detail
         const parsed = parseAxiosError(e);
         await setMeta(store, {
           error: parsed.message,
@@ -678,10 +671,16 @@ app.get("/api/stores", (req, res) => {
   });
 });
 
-// Read cached orders from Mongo with pagination
+// Read cached orders from Mongo
+// - Default: paginated
+// - If ?all=true : return ALL orders (no cap)
 app.get("/api/orders", async (req, res) => {
   const store = resolveStoreFromRequest(req);
-  // const limit = Math.max(1, Math.min(Number(req.query.limit || 200) || 200, 5000));
+
+  const all = String(req.query.all || "false").toLowerCase() === "true";
+
+  // Normal paginated mode
+  const limit = Math.max(1, Math.max(Number(req.query.limit) || 5000));
   const skip = Math.max(0, Number(req.query.skip || 0) || 0);
 
   try {
@@ -694,7 +693,17 @@ app.get("/api/orders", async (req, res) => {
     }
 
     const col = await getOrdersCol(store.storeKey);
-    const orders = await col.find({}).sort({ createdAt: -1 }).toArray();//.skip(skip).limit(limit)
+
+    // Useful for UI even in "all" mode
+    const totalCached = await col.estimatedDocumentCount().catch(() => null);
+
+    let cursor = col.find({}).sort({ createdAt: -1 });
+
+    if (!all) {
+      cursor = cursor.skip(skip).limit(limit);
+    }
+
+    const orders = await cursor.toArray();
 
     res.json({
       ok: true,
@@ -703,9 +712,14 @@ app.get("/api/orders", async (req, res) => {
       shop: store.domain,
       source: "mongodb",
       collection: ordersCollectionName(store.storeKey),
-      skip,
-      // limit,
+
+      all,
+      totalCached,
+
+      skip: all ? 0 : skip,
+      limit: all ? null : limit,
       count: orders.length,
+
       orders,
     });
   } catch (err) {
@@ -737,7 +751,7 @@ app.get("/api/health", async (req, res) => {
         pages: m?.pages || null,
         error: m?.error || null,
         errorStatus: m?.errorStatus || null,
-        errorDetail: m?.errorDetail || null, // IMPORTANT: shows 400 body
+        errorDetail: m?.errorDetail || null,
         note: m?.note || null,
       });
     }
@@ -845,4 +859,3 @@ app.listen(PORT, async () => {
 });
 
 module.exports = app;
- 
