@@ -694,7 +694,7 @@ function App() {
 
   // ✅ corrections to apply on download
   const [cellCorrections, setCellCorrections] = useState([]);
-  const [expandedOrder, setExpandedOrder] = useState(null);
+  // const [expandedOrder, setExpandedOrder] = useState(null);
 
   // ✅ side-by-side compare toggle
   const [compareShowAllRows, setCompareShowAllRows] = useState(false);
@@ -1769,7 +1769,7 @@ const handleRunCheck = async () => {
 
               <tbody>
                 {results.map((r) => {
-                  const isExpanded = expandedOrder === r.order;
+                  // const isExpanded = expandedOrder === r.order;
                   return (
                     <React.Fragment key={r.order}>
                       <tr className={r.status === "mismatch" ? "row-red" : "row-green"}>
@@ -1782,7 +1782,7 @@ const handleRunCheck = async () => {
                         <td>{isNaN(r.difference) ? "" : Number(r.difference).toFixed(2)}</td>
                         <td>{r.status === "mismatch" ? "❌ mismatch" : "✅ ok"}</td>
                         <td>{r.itemsCompared ?? 0}</td>
-                        <td>
+                        {/* <td>
                           <button
                             type="button"
                             className="button small"
@@ -1790,11 +1790,11 @@ const handleRunCheck = async () => {
                           >
                             {isExpanded ? "Hide" : "Show"}
                           </button>
-                        </td>
+                        </td> */}
                         <td>{r.shopifyMatch ?? "—"}</td>
                       </tr>
 
-                      {isExpanded && (
+                      {/* {isExpanded && (
                         <tr key={`${r.order}-detail`}>
                           <td colSpan={11} style={{ background: "rgba(0,0,0,0.06)", color: "#000", padding: 12 }}>
                             <div style={{ display: "flex", gap: 20 }}>
@@ -1837,7 +1837,7 @@ const handleRunCheck = async () => {
                             </div>
                           </td>
                         </tr>
-                      )}
+                      )} */}
                     </React.Fragment>
                   );
                 })}
