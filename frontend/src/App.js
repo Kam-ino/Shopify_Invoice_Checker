@@ -1762,7 +1762,7 @@ const handleRunCheck = async () => {
                   <th>Difference</th>
                   <th>Invoice Status</th>
                   <th>Items Compared</th>
-                  <th>Details</th>
+                  {/* <th>Details</th> */}
                   <th>Shopify Match</th>
                 </tr>
               </thead>
