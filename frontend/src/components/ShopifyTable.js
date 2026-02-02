@@ -95,7 +95,7 @@ export default function ShopifyTable({ orders: ordersProp, data, title }) {
 
   return (
     <div className="wrapper">
-      <h3 style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+      <h3 style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 85 }}>
         {title}
         <button className="button-small" onClick={() => setExpanded(!expanded)}>
           {expanded ? "Hide" : "Show"}
@@ -182,7 +182,7 @@ export default function ShopifyTable({ orders: ordersProp, data, title }) {
             </div>
           </>
         ) : (
-          <p>Loading…</p>
+          <p>Please Upload Invoice File...</p>
         )}
       </div>
     </div>

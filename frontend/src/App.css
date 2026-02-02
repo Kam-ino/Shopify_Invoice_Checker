@@ -47,7 +47,7 @@
 
   /* consistent spacing */
   margin: 12px 0;
-  max-height: fit-content;
+  height: 750px;
 }
 
 .table-wrapper {
@@ -372,7 +372,7 @@ input[type="file"] {
 
 .viewer {
   width: 100%;
-  max-height: 250px;
+  max-height: 600px;
   background-color: #acacac;
   padding: 20px;
   display: flex;
@@ -494,7 +494,7 @@ input[type="file"] {
   }
 
   .viewer {
-    max-height: 220px;
+    max-height: 600px;
     padding: 12px;
   }
 

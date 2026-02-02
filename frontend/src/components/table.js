@@ -1,6 +1,22 @@
 import { useState } from "react";
 import * as XLSX from "xlsx";
 
+function makeUniqueHeaders(headerRow) {
+  const counts = new Map();
+  return (headerRow || []).map((h, idx) => {
+    const base =
+      h !== undefined && h !== null && String(h).trim() !== ""
+        ? String(h).trim()
+        : `Column ${idx + 1}`;
+
+    const n = counts.get(base) || 0;
+    counts.set(base, n + 1);
+
+    // "SKU", "SKU.1", "SKU.2" ...
+    return n === 0 ? base : `${base}.${n}`;
+  });
+}
+
 function Table({ title, onDataChange }) {
   const [rows, setRows] = useState(null);
   const [columns, setColumns] = useState([]);
@@ -28,14 +44,15 @@ function Table({ title, onDataChange }) {
 
     const reader = new FileReader();
     reader.readAsArrayBuffer(selectedFile);
+
     reader.onload = (event) => {
       try {
         const buffer = event.target.result;
+
         const workbook = XLSX.read(buffer, { type: "buffer" });
         const sheetName = workbook.SheetNames[0];
         const worksheet = workbook.Sheets[sheetName];
 
-        // Read as array-of-arrays to preserve exact column order
         const rowsAsArrays = XLSX.utils.sheet_to_json(worksheet, {
           header: 1,
           defval: "",
@@ -48,12 +65,9 @@ function Table({ title, onDataChange }) {
           return;
         }
 
+        // ✅ Make headers unique so React keys + object keys never collide
         const headerRow = rowsAsArrays[0];
-        const headers = headerRow.map((h, idx) =>
-          h !== undefined && h !== null && String(h) !== ""
-            ? String(h) // keep original header exactly
-            : `Column ${idx + 1}`
-        );
+        const headers = makeUniqueHeaders(headerRow);
 
         const dataRows = rowsAsArrays.slice(1).map((rowArr) => {
           const obj = {};
@@ -65,7 +79,15 @@ function Table({ title, onDataChange }) {
 
         setColumns(headers);
         setRows(dataRows);
-        onDataChange && onDataChange({ rows: dataRows, columns: headers });
+
+        // ✅ pass file + buffer so App.js can do multi-sheet parsing + corrected download
+        onDataChange &&
+          onDataChange({
+            rows: dataRows,
+            columns: headers,
+            file: selectedFile,
+            arrayBuffer: buffer,
+          });
       } catch (err) {
         console.error("Error reading file", err);
         setTypeError("There was a problem reading this file.");
@@ -80,10 +102,7 @@ function Table({ title, onDataChange }) {
     <div className="wrapper">
       <h3>{title}</h3>
 
-      <form
-        className="form-group custom-form"
-        onSubmit={(e) => e.preventDefault()}
-      >
+      <form className="form-group custom-form" onSubmit={(e) => e.preventDefault()}>
         <input
           type="file"
           id={title}
@@ -108,16 +127,16 @@ function Table({ title, onDataChange }) {
             <table className="table">
               <thead>
                 <tr>
-                  {columns.map((col) => (
-                    <th key={col}>{col}</th>
+                  {columns.map((col, colIndex) => (
+                    <th key={`${col}-${colIndex}`}>{col}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {rows.slice(0, 9999).map((row, index) => (
-                  <tr key={index}>
-                    {columns.map((col) => (
-                      <td key={col}>{row[col]}</td>
+                {rows.slice(0, 9999).map((row, rowIndex) => (
+                  <tr key={rowIndex}>
+                    {columns.map((col, colIndex) => (
+                      <td key={`${rowIndex}-${col}-${colIndex}`}>{row[col]}</td>
                     ))}
                   </tr>
                 ))}
