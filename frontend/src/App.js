@@ -167,34 +167,34 @@ function buildPriceIndex(pricesRows) {
   return index;
 }
 
-function groupByOrder(ordersRows) {
-  const map = {};
-  if (!ordersRows) return map;
+// function groupByOrder(ordersRows) {
+//   const map = {};
+//   if (!ordersRows) return map;
 
-  // Drop identical rows duplicated across sheets (common in multi-sheet exports)
-  const DEDUPE_COLS = ["Store", "Order#", "Country", "Tracking", "Carrier", "Item", "SKU.1", "SKU", "QTY", "Cost", "Upsell", "Total"];
-  const seen = new Map(); // orderNo -> Set(dedupeKey)
+//   // Drop identical rows duplicated across sheets (common in multi-sheet exports)
+//   const DEDUPE_COLS = ["Store", "Order#", "Country", "Tracking", "Carrier", "Item", "SKU.1", "SKU", "QTY", "Cost", "Upsell", "Total"];
+//   const seen = new Map(); // orderNo -> Set(dedupeKey)
 
-  ordersRows.forEach((row) => {
-    const orderNo = row["Order#"];
-    if (!orderNo) return;
+//   ordersRows.forEach((row) => {
+//     const orderNo = row["Order#"];
+//     if (!orderNo) return;
 
-    const key = DEDUPE_COLS.map((c) =>
-      String(row?.[c] ?? "").trim().replace(/\s+/g, " ")
-    ).join("||");
+//     const key = DEDUPE_COLS.map((c) =>
+//       String(row?.[c] ?? "").trim().replace(/\s+/g, " ")
+//     ).join("||");
 
-    if (!seen.has(orderNo)) seen.set(orderNo, new Set());
-    const set = seen.get(orderNo);
+//     if (!seen.has(orderNo)) seen.set(orderNo, new Set());
+//     const set = seen.get(orderNo);
 
-    if (set.has(key)) return; // ✅ duplicate (same order, same row values)
-    set.add(key);
+//     if (set.has(key)) return; // ✅ duplicate (same order, same row values)
+//     set.add(key);
 
-    if (!map[orderNo]) map[orderNo] = [];
-    map[orderNo].push(row);
-  });
+//     if (!map[orderNo]) map[orderNo] = [];
+//     map[orderNo].push(row);
+//   });
 
-  return map;
-}
+//   return map;
+// }
 
 
 function computeOrderResult(orderRows, priceIndexDefault, priceIndexQty1to5, countryColumnsMap) {
@@ -346,37 +346,37 @@ const splitItemAndVariant = (raw) => {
 };
 
 // ✅ canonicalizer for title comparisons (diacritics/™/dashes/brand suffix)
-const canonTitle = (s) => {
-  let t = normText(s)
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[™®©]/g, "")
-    .replace(/[–—]/g, "-")
-    .trim();
+// const canonTitle = (s) => {
+//   let t = normText(s)
+//     .normalize("NFD")
+//     .replace(/[\u0300-\u036f]/g, "")
+//     .replace(/[™®©]/g, "")
+//     .replace(/[–—]/g, "-")
+//     .trim();
 
-  // remove common branding suffix patterns
-  t = t.replace(/\s*-\s*cellumove\s*$/i, "").trim();
+//   // remove common branding suffix patterns
+//   t = t.replace(/\s*-\s*cellumove\s*$/i, "").trim();
 
-  return t.toLowerCase();
-};
+//   return t.toLowerCase();
+// };
 
-const canonProductBase = (s) => {
-  let t = normText(s)
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[™®©]/g, "")
-    .replace(/[–—]/g, "-")
-    .trim();
+// const canonProductBase = (s) => {
+//   let t = normText(s)
+//     .normalize("NFD")
+//     .replace(/[\u0300-\u036f]/g, "")
+//     .replace(/[™®©]/g, "")
+//     .replace(/[–—]/g, "-")
+//     .trim();
 
-  // keep only base before marketing tagline
-  t = t.split(/\s-\s/)[0].trim();
+//   // keep only base before marketing tagline
+//   t = t.split(/\s-\s/)[0].trim();
 
-  // small plural normalization
-  t = t.replace(/\bleggings\b/gi, "legging");
-  t = t.replace(/\bsleeves\b/gi, "sleeve");
+//   // small plural normalization
+//   t = t.replace(/\bleggings\b/gi, "legging");
+//   t = t.replace(/\bsleeves\b/gi, "sleeve");
 
-  return t.toLowerCase();
-};
+//   return t.toLowerCase();
+// };
 
 
 /**
@@ -409,140 +409,140 @@ const shouldKeepShopifyLineItem = (node) => {
 };
 
 // Build SKU -> Item name map from quotation sheet rows
-const buildSkuToItemNameMap = (rows) => {
-  const map = new Map();
-  (rows || []).forEach((r) => {
-    const skuRaw = r?.["SKU"] || r?.["Sku"];
-    if (!skuRaw) return;
+// const buildSkuToItemNameMap = (rows) => {
+//   const map = new Map();
+//   (rows || []).forEach((r) => {
+//     const skuRaw = r?.["SKU"] || r?.["Sku"];
+//     if (!skuRaw) return;
 
-    const skuBase = normalizeSkuBase(skuRaw);
-    const name = String(r?.["Item name"] || r?.["Item Name"] || r?.["Item"] || r?.["Name"] || "").trim();
-    if (!name) return;
+//     const skuBase = normalizeSkuBase(skuRaw);
+//     const name = String(r?.["Item name"] || r?.["Item Name"] || r?.["Item"] || r?.["Name"] || "").trim();
+//     if (!name) return;
 
-    if (!map.has(skuBase)) map.set(skuBase, name);
-  });
-  return map;
-};
+//     if (!map.has(skuBase)) map.set(skuBase, name);
+//   });
+//   return map;
+// };
 
 // ✅ Invoice signature for Shopify comparison:
 // uses Trackings&Costs: Item (SKU-ish) + QTY → maps to Quotation: SKU → Item name
-const buildInvoiceSignatureViaQuotation = (orderRows, columns, skuToNameMap) => {
-  const qtyCol = findColumn(columns, ["QTY", "Quantity"]);
-  const itemCol = findColumn(columns, ["Item", "SKU.1", "SKU"]);
-  if (!qtyCol || !itemCol) return [];
+// const buildInvoiceSignatureViaQuotation = (orderRows, columns, skuToNameMap) => {
+//   const qtyCol = findColumn(columns, ["QTY", "Quantity"]);
+//   const itemCol = findColumn(columns, ["Item", "SKU.1", "SKU"]);
+//   if (!qtyCol || !itemCol) return [];
 
-  const agg = new Map(); // canonProductBase(quotationName) -> qty
+//   const agg = new Map(); // canonProductBase(quotationName) -> qty
 
-  for (const r of orderRows) {
-    const qty = Number(r?.[qtyCol] ?? 0) || 0;
-    if (qty <= 0) continue;
+//   for (const r of orderRows) {
+//     const qty = Number(r?.[qtyCol] ?? 0) || 0;
+//     if (qty <= 0) continue;
 
-    const rawSku = String(r?.[itemCol] ?? "").trim();
-    if (!rawSku) continue;
+//     const rawSku = String(r?.[itemCol] ?? "").trim();
+//     if (!rawSku) continue;
 
-    const skuBase = normalizeSkuBase(rawSku);
-    const quotationName = skuToNameMap.get(skuBase) || `unknown sku ${skuBase}`;
+//     const skuBase = normalizeSkuBase(rawSku);
+//     const quotationName = skuToNameMap.get(skuBase) || `unknown sku ${skuBase}`;
 
-    const key = canonProductBase(quotationName);
-    agg.set(key, (agg.get(key) || 0) + qty);
-  }
+//     const key = canonProductBase(quotationName);
+//     agg.set(key, (agg.get(key) || 0) + qty);
+//   }
 
-  return Array.from(agg.entries())
-    .map(([k, v]) => `${k}||${v}`)
-    .sort();
-};
+//   return Array.from(agg.entries())
+//     .map(([k, v]) => `${k}||${v}`)
+//     .sort();
+// };
 
 /**
  * ✅ Tracking signature:
  * Prefer SKU+QTY if SKU exists.
  * Else use normalized title+QTY.
  */
-const buildTrackingSignature = (orderRows, columns) => {
-  const qtyCol = findColumn(columns, ["QTY", "Quantity"]);
-  const skuCol = findColumn(columns, ["SKU", "Sku", "Variant SKU", "Variant Sku", "SKU.1"]); // include SKU.1
-  const lineItemsCol = findColumn(columns, ["Line Items", "Line Item", "Line items", "Line item"]);
+// const buildTrackingSignature = (orderRows, columns) => {
+//   const qtyCol = findColumn(columns, ["QTY", "Quantity"]);
+//   const skuCol = findColumn(columns, ["SKU", "Sku", "Variant SKU", "Variant Sku", "SKU.1"]); // include SKU.1
+//   const lineItemsCol = findColumn(columns, ["Line Items", "Line Item", "Line items", "Line item"]);
 
-  const itemNameCol = findColumn(columns, [
-    "Item name",
-    "Item Name",
-    "Product name",
-    "Product Name",
-    "Product",
-    "Name",
-    "Line item name",
-    "Line Item Name",
-    "Item",
-  ]);
+//   const itemNameCol = findColumn(columns, [
+//     "Item name",
+//     "Item Name",
+//     "Product name",
+//     "Product Name",
+//     "Product",
+//     "Name",
+//     "Line item name",
+//     "Line Item Name",
+//     "Item",
+//   ]);
 
-  if (!qtyCol) return [];
+//   if (!qtyCol) return [];
 
-  // ✅ aggregate: key -> summedQty
-  const agg = new Map();
+//   // ✅ aggregate: key -> summedQty
+//   const agg = new Map();
 
-  for (const r of orderRows) {
-    const qty = Number(r?.[qtyCol] ?? 0) || 0;
-    if (qty <= 0) continue;
+//   for (const r of orderRows) {
+//     const qty = Number(r?.[qtyCol] ?? 0) || 0;
+//     if (qty <= 0) continue;
 
-    // Prefer SKU if present
-    const sku = skuCol ? normText(r?.[skuCol]) : "";
-    if (sku) {
-      const key = `sku:${sku.toLowerCase()}`;
-      agg.set(key, (agg.get(key) || 0) + qty);
-      continue;
-    }
+//     // Prefer SKU if present
+//     const sku = skuCol ? normText(r?.[skuCol]) : "";
+//     if (sku) {
+//       const key = `sku:${sku.toLowerCase()}`;
+//       agg.set(key, (agg.get(key) || 0) + qty);
+//       continue;
+//     }
 
-    // Otherwise build a clean item name (strip variant)
-    let item = "";
-    if (itemNameCol) {
-      item = splitItemAndVariant(r?.[itemNameCol]).item; // strips " - Variant"
-    }
-    if (!item && lineItemsCol) {
-      // if Line Items is used, strip variant too
-      item = splitItemAndVariant(r?.[lineItemsCol]).item;
-    }
+//     // Otherwise build a clean item name (strip variant)
+//     let item = "";
+//     if (itemNameCol) {
+//       item = splitItemAndVariant(r?.[itemNameCol]).item; // strips " - Variant"
+//     }
+//     if (!item && lineItemsCol) {
+//       // if Line Items is used, strip variant too
+//       item = splitItemAndVariant(r?.[lineItemsCol]).item;
+//     }
 
-    item = normText(item);
-    if (!item) continue;
+//     item = normText(item);
+//     if (!item) continue;
 
-    const key = canonTitle(item);
-    agg.set(key, (agg.get(key) || 0) + qty);
-  }
+//     const key = canonTitle(item);
+//     agg.set(key, (agg.get(key) || 0) + qty);
+//   }
 
-  const sigs = [];
-  for (const [key, summedQty] of agg.entries()) {
-    sigs.push(`${key}||${summedQty}`);
-  }
-  sigs.sort();
-  return sigs;
-};
+//   const sigs = [];
+//   for (const [key, summedQty] of agg.entries()) {
+//     sigs.push(`${key}||${summedQty}`);
+//   }
+//   sigs.sort();
+//   return sigs;
+// };
 
 /**
  * ✅ Shopify signature:
  * Prefer SKU+QTY if available (node.sku or node.variant.sku).
  * Else use normalized title+QTY.
  */
-const buildShopifySignature = (shopifyOrder) => {
-  const edges = shopifyOrder?.lineItems?.edges ?? [];
-  const agg = new Map();
+// const buildShopifySignature = (shopifyOrder) => {
+//   const edges = shopifyOrder?.lineItems?.edges ?? [];
+//   const agg = new Map();
 
-  for (const e of edges) {
-    const node = e?.node;
-    if (!shouldKeepShopifyLineItem(node)) continue;
+//   for (const e of edges) {
+//     const node = e?.node;
+//     if (!shouldKeepShopifyLineItem(node)) continue;
 
-    const qty = Number(node.currentQuantity ?? node.quantity ?? 0) || 0;
-    if (qty <= 0) continue;
+//     const qty = Number(node.currentQuantity ?? node.quantity ?? 0) || 0;
+//     if (qty <= 0) continue;
 
-    const title = normText(node.title);
-    if (!title) continue;
+//     const title = normText(node.title);
+//     if (!title) continue;
 
-    const key = canonProductBase(title);
-    agg.set(key, (agg.get(key) || 0) + qty);
-  }
+//     const key = canonProductBase(title);
+//     agg.set(key, (agg.get(key) || 0) + qty);
+//   }
 
-  return Array.from(agg.entries())
-    .map(([k, v]) => `${k}||${v}`)
-    .sort();
-};
+//   return Array.from(agg.entries())
+//     .map(([k, v]) => `${k}||${v}`)
+//     .sort();
+// };
 
 const arraysEqual = (a, b) => {
   if (a.length !== b.length) return false;
