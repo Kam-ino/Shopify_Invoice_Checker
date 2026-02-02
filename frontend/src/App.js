@@ -75,7 +75,7 @@ function normalizeSkuBase(raw) {
   const s = String(raw || "").trim();
 
   // take only the first token before variant separators
-  const first = s.split(/[\s\-\/_]/)[0]; // "ce001-black/l" -> "ce001"
+  const first = s.split(/[\s\-/_]/)[0]; // "ce001-black/l" -> "ce001"
 
   // keep leading letters+digits with optional trailing letter (CE001A)
   const m = first.match(/^([A-Z]+)(\d+)([A-Z])?$/i);
