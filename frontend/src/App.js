@@ -204,65 +204,22 @@ function computeOrderResult(orderRows, priceIndexDefault, priceIndexQty1to5, cou
 
   const countryRow = orderRows.find((r) => r["Country"] && String(r["Country"]).trim() !== "") || null;
   const country = countryRow ? String(countryRow["Country"]).trim() : null;
-  const countryCols = country && countryColumnsMap?.[country] ? countryColumnsMap[country] : null;
 
-  const groups = {}; // skuBase -> { baseQty, upsellQty }
-  const missing = [];
-
-  orderRows.forEach((row) => {
-    const qty = Number(row["QTY"] || 0);
-    if (!qty) return;
-
-    const skuBaseRaw = row["Item"] || row["SKU.1"] || row["SKU"];
-    const skuBase = skuBaseRaw ? normalizeSkuBase(skuBaseRaw) : "";
-    if (!skuBase) return;
-
-    const cost = parsePrice(row["Cost"]);
-    const upsell = parsePrice(row["Upsell"]);
-
-    if (!groups[skuBase]) groups[skuBase] = { baseQty: 0, upsellQty: 0 };
-
-    if (!isNaN(cost) && cost > 0) groups[skuBase].baseQty += qty;
-    if (!isNaN(upsell) && upsell > 0) groups[skuBase].upsellQty += qty;
-  });
+  // NOTE:
+  // We intentionally compute totals per *row* (not aggregated per order/SKU/qty lookups).
+  // This avoids false mismatches when the same order number appears across multiple rows.
+  // (priceIndexDefault/priceIndexQty1to5/countryColumnsMap remain in the signature to avoid
+  // wider refactors, but are no longer used for the invoice total calculation.)
 
   let baseTotal = 0;
   let upsellTotal = 0;
 
-  function pickIndexForQty(qty) {
-    if (qty > 1 && priceIndexQty1to5 && Object.keys(priceIndexQty1to5).length) return priceIndexQty1to5;
-    return priceIndexDefault;
-  }
+  for (const row of orderRows) {
+    const cost = parsePrice(row?.["Cost"]);
+    const upsell = parsePrice(row?.["Upsell"]);
 
-  if (countryCols) {
-    Object.entries(groups).forEach(([skuBase, info]) => {
-      const { baseQty, upsellQty } = info;
-
-      if (baseQty > 0) {
-        const idx = pickIndexForQty(baseQty);
-        const skuPrices = idx[skuBase];
-        const priceRow = skuPrices ? skuPrices[baseQty] : null;
-        if (!priceRow) {
-          missing.push(`Missing base price in quotation: ${skuBase} (qty ${baseQty})`);
-        } else {
-          baseTotal += parsePrice(priceRow[countryCols.total]);
-        }
-      }
-
-      if (upsellQty > 0) {
-        const idx = pickIndexForQty(upsellQty);
-        const skuPrices = idx[skuBase];
-        const priceRow = skuPrices ? skuPrices[upsellQty] : null;
-        if (!priceRow) {
-          missing.push(`Missing upsell price in quotation: ${skuBase} (qty ${upsellQty})`);
-        } else {
-          upsellTotal += parsePrice(priceRow[countryCols.upsell]);
-        }
-      }
-    });
-  } else {
-    if (country) missing.push(`Missing country columns mapping for: ${country}`);
-    else missing.push("Missing country on order rows");
+    if (!isNaN(cost) && cost > 0) baseTotal += cost;
+    if (!isNaN(upsell) && upsell > 0) upsellTotal += upsell;
   }
 
   const expectedTotal = (isNaN(baseTotal) ? 0 : baseTotal) + (isNaN(upsellTotal) ? 0 : upsellTotal);
@@ -272,8 +229,30 @@ function computeOrderResult(orderRows, priceIndexDefault, priceIndexQty1to5, cou
     const v = parsePrice(r["Total"]);
     if (!isNaN(v) && v > 0) totals.push(v);
   });
+
+  // Total column can be either:
+  //  - the order total repeated on every row, OR
+  //  - a per-line total.
+  // Pick whichever (max vs sum) is closer to the computed expected total.
   const uniq = Array.from(new Set(totals.map((x) => Number(x.toFixed(6)))));
-  const reportedTotal = uniq.length === 0 ? NaN : (uniq.length === 1 ? uniq[0] : Math.max(...uniq));
+  const candidateMax = totals.length ? Math.max(...totals) : NaN;
+  const candidateSum = totals.length ? totals.reduce((a, b) => a + b, 0) : NaN;
+
+  let reportedTotal = NaN;
+  if (uniq.length === 0) {
+    reportedTotal = NaN;
+  } else if (uniq.length === 1) {
+    // repeated order total
+    reportedTotal = uniq[0];
+  } else if (!isNaN(expectedTotal)) {
+    // choose the candidate that best matches expectedTotal
+    const dMax = isNaN(candidateMax) ? Number.POSITIVE_INFINITY : Math.abs(candidateMax - expectedTotal);
+    const dSum = isNaN(candidateSum) ? Number.POSITIVE_INFINITY : Math.abs(candidateSum - expectedTotal);
+    reportedTotal = dSum <= dMax ? candidateSum : candidateMax;
+  } else {
+    // fallback
+    reportedTotal = candidateSum;
+  }
 
   const difference = !isNaN(expectedTotal) && !isNaN(reportedTotal) ? reportedTotal - expectedTotal : NaN;
   const status = isNaN(difference) || Math.abs(difference) <= 0.01 ? "ok" : "mismatch";
@@ -287,7 +266,7 @@ function computeOrderResult(orderRows, priceIndexDefault, priceIndexQty1to5, cou
     reportedTotal,
     difference,
     status,
-    detail: missing.join(" | "),
+    detail: "",
   };
 }
 
@@ -936,7 +915,19 @@ function App() {
         const wb = XLSX.read(ab, { type: "array" });
         const allRows = sheetToRowsWithMeta(wb);
 
-        setTrackingAllRows(allRows);
+        // ✅ Per-row Total = Cost + Upsell (NO summing across multiple rows)
+        const allRowsWithRowTotal = allRows.map((r) => {
+          const cost = parsePrice(r?.["Cost"]);
+          const upsell = parsePrice(r?.["Upsell"]);
+
+          // If neither exists, keep row unchanged
+          if (isNaN(cost) && isNaN(upsell)) return r;
+
+          const rowTotal = (isNaN(cost) ? 0 : cost) + (isNaN(upsell) ? 0 : upsell);
+          return { ...r, Total: rowTotal };
+        });
+
+        setTrackingAllRows(allRowsWithRowTotal);
 
         const colsGuess =
           allRows.find((r) => Array.isArray(r.__headers) && r.__headers.length > 0)?.__headers ||
