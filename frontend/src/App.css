@@ -54,6 +54,7 @@
   max-width: 100%;
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
+  max-height: 600px;
 }
 
 .table {
@@ -90,6 +91,7 @@
   background-color: #7de0ff;
   padding: clamp(14px, 2vw, 20px);
   border-radius: 20px;
+  max-height: fit-content;
 }
 
 .results-table {

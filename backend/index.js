@@ -18,6 +18,9 @@ const MONGODB_URI = String(process.env.MONGODB_URI || "").trim();
 const MONGODB_DB = String(process.env.MONGODB_DB || "invoiceapp").trim();
 const TOKENS_COL = String(process.env.MONGODB_TOKENS_COLLECTION || "shopify_tokens").trim();
 const META_COL = String(process.env.MONGODB_SYNC_META_COLLECTION || "shopify_sync_meta").trim();
+
+// Prefix for orders collections; Option B will make them group-based:
+// shopify_orders_cellumove, shopify_orders_bloomommy, shopify_orders_yuma
 const ORDERS_PREFIX = String(process.env.MONGODB_ORDERS_PREFIX || "shopify_orders_").trim();
 
 const SHOP_KEYS = String(process.env.SHOP_KEYS || "bloomommy,cellumove,yuma")
@@ -61,8 +64,9 @@ function safeMongoSuffix(s) {
     .replace(/^_+|_+$/g, "");
 }
 
-function ordersCollectionName(storeKey) {
-  return `${ORDERS_PREFIX}${safeMongoSuffix(storeKey)}`;
+// ✅ Option B: orders collection is based on GROUP, not STORE.
+function ordersCollectionNameByGroup(groupKey) {
+  return `${ORDERS_PREFIX}${safeMongoSuffix(groupKey)}`; // e.g. shopify_orders_cellumove
 }
 
 function truncateDetail(val, max = MAX_ERROR_DETAIL_CHARS) {
@@ -166,7 +170,6 @@ async function getMongoClient() {
   if (_mongoClient) return _mongoClient;
 
   if (!_mongoPromise) {
-    // IPv4 preference helps in some environments
     const client = new MongoClient(MONGODB_URI, {
       maxPoolSize: 10,
       serverSelectionTimeoutMS: 10000,
@@ -195,15 +198,16 @@ async function getMetaCol() {
   return db.collection(META_COL);
 }
 
-async function getOrdersCol(storeKey) {
+// ✅ Option B: orders collection is resolved by store.groupKey
+async function getOrdersColByGroup(groupKey) {
   const db = await getDb();
-  return db.collection(ordersCollectionName(storeKey));
+  return db.collection(ordersCollectionNameByGroup(groupKey));
 }
 
 async function ensureIndexesForStore(store) {
   const tokens = await getTokensCol();
   const meta = await getMetaCol();
-  const orders = await getOrdersCol(store.storeKey);
+  const orders = await getOrdersColByGroup(store.groupKey);
 
   await tokens.createIndex({ domain: 1 }, { unique: true });
   await tokens.createIndex({ storeKey: 1 }, { unique: true });
@@ -211,9 +215,13 @@ async function ensureIndexesForStore(store) {
   await meta.createIndex({ storeKey: 1 }, { unique: true });
   await meta.createIndex({ domain: 1 });
 
-  await orders.createIndex({ id: 1 }, { unique: true });
-  await orders.createIndex({ createdAt: -1 });
-  await orders.createIndex({ updatedAt: -1 });
+  // ✅ Orders are shared per group, so uniqueness must include storeKey.
+  await orders.createIndex({ storeKey: 1, id: 1 }, { unique: true });
+
+  // Helpful for listing/filtering per-store
+  await orders.createIndex({ storeKey: 1, createdAt: -1 });
+  await orders.createIndex({ storeKey: 1, updatedAt: -1 });
+  await orders.createIndex({ storeKey: 1, name: 1 });
 }
 
 /** -----------------------------
@@ -326,9 +334,6 @@ async function getShopifyToken(store, { force = false } = {}) {
 
 /** -----------------------------
  * Shopify GraphQL
- * - Handles HTTP 429
- * - Handles GraphQL THROTTLED errors (HTTP 200 with errors)
- * - Captures error payloads for debugging
  * ----------------------------*/
 function isThrottledGraphQLError(graphQLErrors) {
   if (!Array.isArray(graphQLErrors)) return false;
@@ -476,16 +481,21 @@ async function fetchOrdersPage({ domain, token, after, updatedSinceIso }) {
   };
 }
 
-async function bulkUpsertOrders(storeKey, orders) {
+// ✅ Option B: upsert into GROUP collection, keyed by storeKey+id
+async function bulkUpsertOrders(store, orders) {
   if (!orders.length) return 0;
 
-  const col = await getOrdersCol(storeKey);
+  const col = await getOrdersColByGroup(store.groupKey);
 
   const ops = orders.map((o) => ({
     updateOne: {
-      filter: { id: o.id },
+      filter: { storeKey: store.storeKey, id: o.id },
       update: {
         $set: {
+          storeKey: store.storeKey,
+          groupKey: store.groupKey,
+          domain: store.domain,
+
           ...o,
           createdAt: o.createdAt ? new Date(o.createdAt) : null,
           updatedAt: o.updatedAt ? new Date(o.updatedAt) : null,
@@ -501,9 +511,9 @@ async function bulkUpsertOrders(storeKey, orders) {
   return (res.upsertedCount || 0) + (res.modifiedCount || 0);
 }
 
-async function estimatedOrderCount(storeKey) {
-  const col = await getOrdersCol(storeKey);
-  return col.estimatedDocumentCount();
+async function estimatedOrderCountForStore(store) {
+  const col = await getOrdersColByGroup(store.groupKey);
+  return col.countDocuments({ storeKey: store.storeKey });
 }
 
 /** -----------------------------
@@ -518,7 +528,7 @@ async function syncStore(store, { full = false, clear = false } = {}) {
   const p = (async () => {
     await ensureIndexesForStore(store);
 
-    const count = await estimatedOrderCount(key);
+    const count = await estimatedOrderCountForStore(store);
     let modeFull = full;
 
     let updatedSinceIso = null;
@@ -547,9 +557,10 @@ async function syncStore(store, { full = false, clear = false } = {}) {
     });
 
     if (modeFull && clear) {
-      const ordersCol = await getOrdersCol(key);
-      await ordersCol.deleteMany({});
-      await setMeta(store, { note: "Cleared orders collection before full sync." });
+      // ✅ Only clear this STORE's documents inside the GROUP collection
+      const ordersCol = await getOrdersColByGroup(store.groupKey);
+      await ordersCol.deleteMany({ storeKey: store.storeKey });
+      await setMeta(store, { note: "Cleared store orders (within group collection) before full sync." });
     }
 
     let auth = await getShopifyToken(store);
@@ -577,7 +588,7 @@ async function syncStore(store, { full = false, clear = false } = {}) {
               if (!maxUpdatedAt || d > maxUpdatedAt) maxUpdatedAt = d;
             }
           }
-          upserts += await bulkUpsertOrders(key, page.nodes);
+          upserts += await bulkUpsertOrders(store, page.nodes);
         }
 
         if (!page.hasNextPage) break;
@@ -666,7 +677,8 @@ app.get("/api/stores", (req, res) => {
       storeKey: s.storeKey,
       groupKey: s.groupKey,
       domain: s.domain,
-      collection: ordersCollectionName(s.storeKey),
+      // ✅ show group collection
+      collection: ordersCollectionNameByGroup(s.groupKey),
     })),
   });
 });
@@ -679,7 +691,6 @@ app.get("/api/orders", async (req, res) => {
 
   const all = String(req.query.all || "false").toLowerCase() === "true";
 
-  // Normal paginated mode
   const limit = Math.max(1, Math.min(Number(req.query.limit) || 5000));
   const skip = Math.max(0, Number(req.query.skip || 0) || 0);
 
@@ -692,12 +703,11 @@ app.get("/api/orders", async (req, res) => {
       syncStore(store, { full: false }).catch(() => {});
     }
 
-    const col = await getOrdersCol(store.storeKey);
+    const col = await getOrdersColByGroup(store.groupKey);
 
-    // Useful for UI even in "all" mode
-    const totalCached = await col.estimatedDocumentCount().catch(() => null);
+    const totalCached = await col.countDocuments({ storeKey: store.storeKey }).catch(() => null);
 
-    let cursor = col.find({}).sort({ createdAt: -1 });
+    let cursor = col.find({ storeKey: store.storeKey }).sort({ createdAt: -1 });
 
     if (!all) {
       cursor = cursor.skip(skip).limit(limit);
@@ -711,7 +721,7 @@ app.get("/api/orders", async (req, res) => {
       group: store.groupKey,
       shop: store.domain,
       source: "mongodb",
-      collection: ordersCollectionName(store.storeKey),
+      collection: ordersCollectionNameByGroup(store.groupKey),
 
       all,
       totalCached,
@@ -734,8 +744,12 @@ app.get("/api/health", async (req, res) => {
 
     const snapshot = [];
     for (const store of STORE_REGISTRY.stores) {
-      const colName = ordersCollectionName(store.storeKey);
-      const cachedCount = await db.collection(colName).estimatedDocumentCount().catch(() => 0);
+      const colName = ordersCollectionNameByGroup(store.groupKey);
+      const cachedCount = await db
+        .collection(colName)
+        .countDocuments({ storeKey: store.storeKey })
+        .catch(() => 0);
+
       const m = await meta.findOne({ storeKey: store.storeKey });
 
       snapshot.push({

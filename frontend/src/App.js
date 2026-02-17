@@ -5,7 +5,7 @@ import Table from "./components/table";
 import * as XLSX from "xlsx-js-style";
 import ShopifyTable from "./components/ShopifyTable";
 
-const API_BASE = (process.env.REACT_APP_API_BASE || "https://shopify-invoice-checker-backend.onrender.com").replace(/\/+$/, "");
+const API_BASE = (process.env.REACT_APP_API_BASE || /*"https://shopify-invoice-checker-backend.onrender.com").replace(/\/+$/, "")*/ "https://localhost:4000").replace(/\/+$/, "");
 
 /* ---------------- Existing helpers ---------------- */
 
@@ -18,6 +18,16 @@ function parsePrice(val) {
   });
   const num = Number(s);
   return isNaN(num) ? NaN : num;
+}
+
+function calcExpectedRowTotal(row, costCol = "Cost", upsellCol = "Upsell") {
+  const cost = parsePrice(row?.[costCol]);
+  const upsell = parsePrice(row?.[upsellCol]);
+
+  const c = Number.isFinite(cost) ? cost : 0;
+  const u = Number.isFinite(upsell) ? upsell : 0;
+
+  return Math.round((c + u) * 100) / 100;
 }
 
 // ✅ Base known columns (we will extend dynamically from Quotation/Prices file)
@@ -324,39 +334,6 @@ const splitItemAndVariant = (raw) => {
   };
 };
 
-// ✅ canonicalizer for title comparisons (diacritics/™/dashes/brand suffix)
-// const canonTitle = (s) => {
-//   let t = normText(s)
-//     .normalize("NFD")
-//     .replace(/[\u0300-\u036f]/g, "")
-//     .replace(/[™®©]/g, "")
-//     .replace(/[–—]/g, "-")
-//     .trim();
-
-//   // remove common branding suffix patterns
-//   t = t.replace(/\s*-\s*cellumove\s*$/i, "").trim();
-
-//   return t.toLowerCase();
-// };
-
-// const canonProductBase = (s) => {
-//   let t = normText(s)
-//     .normalize("NFD")
-//     .replace(/[\u0300-\u036f]/g, "")
-//     .replace(/[™®©]/g, "")
-//     .replace(/[–—]/g, "-")
-//     .trim();
-
-//   // keep only base before marketing tagline
-//   t = t.split(/\s-\s/)[0].trim();
-
-//   // small plural normalization
-//   t = t.replace(/\bleggings\b/gi, "legging");
-//   t = t.replace(/\bsleeves\b/gi, "sleeve");
-
-//   return t.toLowerCase();
-// };
-
 
 /**
  * ✅ Keep only real "ordered/fulfillable/fulfilled" items; exclude "removed".
@@ -595,6 +572,17 @@ function applyCorrectionsToWorkbook(wb, corrections) {
   });
 }
 
+function forceExcelRecalcOnOpen(wb) {
+  // This nudges Excel to recalculate formulas when the file is opened.
+  // Helps restore cells like Customer Name / Address if they are formula-driven.
+  wb.Workbook = wb.Workbook || {};
+  wb.Workbook.CalcPr = wb.Workbook.CalcPr || {};
+  wb.Workbook.CalcPr.fullCalcOnLoad = 1;
+
+  // Optional: some Excel builds respect calcMode too (1 = auto)
+  // wb.Workbook.CalcPr.calcMode = 1;
+}
+
 /* ---------------- Store routing (per row) ---------------- */
 
 function extractCountryFromStoreCell(storeCellValue) {
@@ -653,6 +641,7 @@ function inferStoreKeyFromTracking(orderRows, columns, selectedStore) {
   // Fallback: selected store from dropdown
   return selectedStore || "";
 }
+
 
 /* ---------------- App ---------------- */
 
@@ -1289,37 +1278,41 @@ const handleRunCheck = async () => {
         shopifyMatch = "⚠️ Shopify error";
       }
 
-      // ✅ corrections logic (unchanged guard against bad 0 corrections)
-      const hasPricingConfidence = !res.detail || String(res.detail).trim() === "";
-      const expected = Number(res.expectedTotal);
-      const reported = Number(res.reportedTotal);
+      // ✅ Per-row Total correction for RESULTS TABLE / corrected file:
+      // Total(row) = Cost(row) + Upsell(row)
+      // (SUMMARY table stays order-level because computeOrderResult is unchanged)
 
-      const shouldCorrect =
-        res.status === "mismatch" &&
-        Number.isFinite(expected) &&
-        hasPricingConfidence &&
-        !(expected === 0 && Number.isFinite(reported) && reported !== 0);
+      const totalCol = findColumn(columns, ["Total"]) || "Total";
+      const costCol = findColumn(columns, ["Cost"]) || "Cost";
+      const upsellCol = findColumn(columns, ["Upsell"]) || "Upsell";
 
-      if (shouldCorrect) {
-        const totalCol = findColumn(columns, ["Total"]) || "Total";
-        const totalRowObj = orderRows.find(
-          (r) => r?.[totalCol] !== null && r?.[totalCol] !== undefined && String(r?.[totalCol]).trim() !== ""
-        );
+      for (const r of orderRows) {
+        if (!r?.__sheet || r?.__rowIndex === undefined || !r?.__colIndexByName) continue;
 
-        if (totalRowObj?.__sheet && totalRowObj?.__rowIndex !== undefined && totalRowObj?.__colIndexByName) {
-          const addr = getCellAddress(totalRowObj, totalCol);
-          if (addr) {
-            const corrected = Math.round(expected * 100) / 100;
-            newCorrections.push({
-              sheetName: totalRowObj.__sheet,
-              cell: addr,
-              value: corrected,
-              oldValue: totalRowObj[totalCol],
-              order: trackingOrderRaw,
-              column: totalCol,
-              rowIndex: totalRowObj.__rowIndex,
-            });
-          }
+        const expectedRowTotal = calcExpectedRowTotal(r, costCol, upsellCol);
+        const reportedRowTotal = parsePrice(r?.[totalCol]);
+
+        const mismatch =
+          !Number.isFinite(reportedRowTotal) || Math.abs(reportedRowTotal - expectedRowTotal) > 0.01;
+
+        // Guard: don't overwrite a non-zero Total with 0.00 if cost+upsell are empty
+        if (expectedRowTotal === 0 && Number.isFinite(reportedRowTotal) && reportedRowTotal !== 0) {
+          continue;
+        }
+
+        if (mismatch) {
+          const addr = getCellAddress(r, totalCol);
+          if (!addr) continue;
+
+          newCorrections.push({
+            sheetName: r.__sheet,
+            cell: addr,
+            value: expectedRowTotal,
+            oldValue: r?.[totalCol],
+            order: trackingOrderRaw,
+            column: totalCol,
+            rowIndex: r.__rowIndex,
+          });
         }
       }
 
@@ -1350,7 +1343,21 @@ const handleRunCheck = async () => {
       try {
         const wb = XLSX.read(trackingArrayBuffer, { type: "array" });
         applyCorrectionsToWorkbook(wb, cellCorrections);
-        XLSX.writeFile(wb, "trackings&costs.corrected.xlsx");
+
+        // ensure Excel recalculates formulas on open if helper exists
+        if (typeof forceExcelRecalcOnOpen === "function") forceExcelRecalcOnOpen(wb);
+
+        // Use the original uploaded invoice filename (if available) and append `_corrected` before the extension
+        const maybeFile = ordersFile?.file || ordersFile?.rawFile || null;
+        let outName = "trackings&costs_corrected.xlsx";
+        if (maybeFile && maybeFile.name) {
+          const orig = String(maybeFile.name || "");
+          const dot = orig.lastIndexOf(".");
+          if (dot > 0) outName = orig.slice(0, dot) + "_corrected" + orig.slice(dot);
+          else outName = orig + "_corrected.xlsx";
+        }
+
+        XLSX.writeFile(wb, outName);
         return;
       } catch (e) {
         console.error("Failed to write corrected workbook:", e);
@@ -1753,7 +1760,6 @@ const handleRunCheck = async () => {
                   <th>Difference</th>
                   <th>Invoice Status</th>
                   <th>Items Compared</th>
-                  {/* <th>Details</th> */}
                   <th>Shopify Match</th>
                 </tr>
               </thead>
@@ -1773,62 +1779,8 @@ const handleRunCheck = async () => {
                         <td>{isNaN(r.difference) ? "" : Number(r.difference).toFixed(2)}</td>
                         <td>{r.status === "mismatch" ? "❌ mismatch" : "✅ ok"}</td>
                         <td>{r.itemsCompared ?? 0}</td>
-                        {/* <td>
-                          <button
-                            type="button"
-                            className="button small"
-                            onClick={() => setExpandedOrder(isExpanded ? null : r.order)}
-                          >
-                            {isExpanded ? "Hide" : "Show"}
-                          </button>
-                        </td> */}
                         <td>{r.shopifyMatch ?? "—"}</td>
                       </tr>
-
-                      {/* {isExpanded && (
-                        <tr key={`${r.order}-detail`}>
-                          <td colSpan={11} style={{ background: "rgba(0,0,0,0.06)", color: "#000", padding: 12 }}>
-                            <div style={{ display: "flex", gap: 20 }}>
-                              <div style={{ flex: 1 }}>
-                                <strong>
-                                  Invoice (tracking) — {Object.keys(r.trackingMap || {}).length} item(s)
-                                  {typeof r.trackingSig !== 'undefined' ? ` — sigs: ${r.trackingSig?.length ?? 0}` : ''}
-                                </strong>
-                                <ul style={{ marginTop: 6 }}>
-                                  {(r.trackingMap && Object.keys(r.trackingMap).length) ? Object.entries(r.trackingMap).map(([k, v]) => (
-                                    <li key={k}>{k} — {v}</li>
-                                  )) : (<li>—</li>)}
-                                </ul>
-                              </div>
-
-                              <div style={{ flex: 1 }}>
-                                <strong>
-                                  Shopify — {Object.keys(r.shopifyMap || {}).length} item(s)
-                                  {typeof r.shopifySig !== 'undefined' ? ` — sigs: ${r.shopifySig?.length ?? 0}` : ''}
-                                </strong>
-                                <ul style={{ marginTop: 6 }}>
-                                  {(r.shopifyMap && Object.keys(r.shopifyMap).length) ? Object.entries(r.shopifyMap).map(([k, v]) => (
-                                    <li key={k}>{k} — {v}</li>
-                                  )) : (<li>—</li>)}
-                                </ul>
-                              </div>
-
-                              <div style={{ flex: 1 }}>
-                                <strong>Diff</strong>
-                                <ul style={{ marginTop: 6 }}>
-                                  {Array.from(new Set([...(Object.keys(r.trackingMap || {})), ...(Object.keys(r.shopifyMap || {}))])).sort().map((k) => {
-                                    const t = r.trackingMap?.[k] ?? 0;
-                                    const s = r.shopifyMap?.[k] ?? 0;
-                                    return (
-                                      <li key={k}>{k}: {t} vs {s}{t === s ? '' : ' ⚠️'}</li>
-                                    );
-                                  })}
-                                </ul>
-                              </div>
-                            </div>
-                          </td>
-                        </tr>
-                      )} */}
                     </React.Fragment>
                   );
                 })}
